@@ -554,6 +554,79 @@ impl eframe::App for ViewerApp {
                 }
             });
 
+        // Property overlay (top-left).
+        if self.show_properties {
+            egui::Area::new(egui::Id::new("properties_overlay"))
+                .fixed_pos(egui::pos2(10.0, 10.0))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(180))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.style_mut().visuals.override_text_color =
+                                Some(egui::Color32::from_gray(220));
+
+                            if let Some(fl) = &self.file_list {
+                                if let Some(path) = fl.current_path() {
+                                    // Filename.
+                                    let filename = path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    ui.label(format!("File: {}", filename));
+
+                                    // File size.
+                                    if let Ok(meta) = std::fs::metadata(path) {
+                                        let size_bytes = meta.len();
+                                        let size_str = if size_bytes >= 1_048_576 {
+                                            format!("{:.1} MB", size_bytes as f64 / 1_048_576.0)
+                                        } else if size_bytes >= 1024 {
+                                            format!("{:.1} KB", size_bytes as f64 / 1024.0)
+                                        } else {
+                                            format!("{} B", size_bytes)
+                                        };
+                                        ui.label(format!("Size: {}", size_str));
+                                    }
+
+                                    // Image dimensions.
+                                    if let Some(img_size) = self.image_size {
+                                        ui.label(format!(
+                                            "Dimensions: {} x {}",
+                                            img_size[0], img_size[1]
+                                        ));
+                                    }
+
+                                    // Position in list.
+                                    ui.label(format!(
+                                        "Position: {} / {}",
+                                        fl.current_index() + 1,
+                                        fl.file_count()
+                                    ));
+
+                                    // Rotation.
+                                    if self.transform.rotation != 0 {
+                                        ui.label(format!(
+                                            "Rotation: {}°",
+                                            self.transform.rotation
+                                        ));
+                                    }
+
+                                    // Slideshow status.
+                                    if self.slideshow_active {
+                                        ui.label(format!(
+                                            "Slideshow: {:.0}s interval",
+                                            self.slideshow_interval
+                                        ));
+                                    }
+                                }
+                            }
+                        });
+                });
+        }
+
         // Context menu (rendered as a floating area).
         if self.show_context_menu {
             let menu_pos = self.context_menu_pos;
