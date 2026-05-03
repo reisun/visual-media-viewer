@@ -19,12 +19,20 @@ pub enum FitModeSetting {
     OriginalSize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupBySetting {
+    Off,
+    ModifiedDate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub rotation: u16,
     pub fit_mode: FitModeSetting,
     pub sort_key: SortKeySetting,
     pub sort_order: SortOrderSetting,
+    #[serde(default)]
+    pub group_by: GroupBySetting,
 }
 
 impl Default for Settings {
@@ -34,7 +42,14 @@ impl Default for Settings {
             fit_mode: FitModeSetting::FitToWindow,
             sort_key: SortKeySetting::Name,
             sort_order: SortOrderSetting::Ascending,
+            group_by: GroupBySetting::Off,
         }
+    }
+}
+
+impl Default for GroupBySetting {
+    fn default() -> Self {
+        Self::Off
     }
 }
 

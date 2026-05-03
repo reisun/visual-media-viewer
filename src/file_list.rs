@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-/// Supported image file extensions (lowercase).
 const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
 
 /// Returns true if the path has a supported image extension (case-insensitive).
@@ -41,20 +41,59 @@ pub enum SortOrder {
     Descending,
 }
 
+/// Grouping mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    Off,
+    ModifiedDate,
+}
+
+/// Date group categories (ordered from newest to oldest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DateGroup {
+    Today = 0,
+    LastWeek = 1,
+    LastMonth = 2,
+    ThisYear = 3,
+    LongAgo = 4,
+}
+
+fn days_since_epoch(time: SystemTime) -> i64 {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() / 86400) as i64,
+        Err(_) => 0,
+    }
+}
+
+fn classify_date_group(file_time: SystemTime) -> DateGroup {
+    let now_days = days_since_epoch(SystemTime::now());
+    let file_days = days_since_epoch(file_time);
+    let diff = now_days - file_days;
+
+    if diff <= 0 {
+        DateGroup::Today
+    } else if diff <= 7 {
+        DateGroup::LastWeek
+    } else if diff <= 30 {
+        DateGroup::LastMonth
+    } else if diff <= 365 {
+        DateGroup::ThisYear
+    } else {
+        DateGroup::LongAgo
+    }
+}
+
 /// Manages a sorted list of image files in a directory for navigation.
 pub struct FileList {
     files: Vec<PathBuf>,
     current_index: usize,
-    /// The directory this file list was built from.
     directory: PathBuf,
-    /// Current sort key.
     pub sort_key: SortKey,
-    /// Current sort order.
     pub sort_order: SortOrder,
+    pub group_by: GroupBy,
 }
 
 impl FileList {
-    /// Scan a directory for supported image files and sort them by name (ascending).
     pub fn from_directory(dir: &Path) -> Self {
         let mut fl = Self {
             files: Vec::new(),
@@ -62,12 +101,12 @@ impl FileList {
             directory: dir.to_path_buf(),
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
+            group_by: GroupBy::Off,
         };
         fl.scan_and_sort();
         fl
     }
 
-    /// Scan directory and sort files according to current sort_key and sort_order.
     fn scan_and_sort(&mut self) {
         let mut files: Vec<PathBuf> = match std::fs::read_dir(&self.directory) {
             Ok(entries) => entries
@@ -83,8 +122,25 @@ impl FileList {
 
         let sort_key = self.sort_key;
         let sort_order = self.sort_order;
+        let group_by = self.group_by;
 
         files.sort_by(|a, b| {
+            // Group first if enabled.
+            if group_by == GroupBy::ModifiedDate {
+                let a_time = file_modified_time(a);
+                let b_time = file_modified_time(b);
+                let a_group = classify_date_group(a_time);
+                let b_group = classify_date_group(b_time);
+                let group_cmp = match sort_order {
+                    SortOrder::Ascending => a_group.cmp(&b_group),
+                    SortOrder::Descending => b_group.cmp(&a_group),
+                };
+                if group_cmp != std::cmp::Ordering::Equal {
+                    return group_cmp;
+                }
+            }
+
+            // Then sort within group.
             let cmp = match sort_key {
                 SortKey::Name => {
                     let a_name = a.file_name().unwrap_or_default().to_string_lossy();
@@ -92,12 +148,8 @@ impl FileList {
                     natord::compare_ignore_case(&a_name, &b_name)
                 }
                 SortKey::ModifiedDate => {
-                    let a_time = std::fs::metadata(a)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    let b_time = std::fs::metadata(b)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    let a_time = file_modified_time(a);
+                    let b_time = file_modified_time(b);
                     a_time.cmp(&b_time)
                 }
             };
@@ -110,13 +162,20 @@ impl FileList {
         self.files = files;
     }
 
-    /// Re-sort the file list with new sort parameters, preserving the current file.
     pub fn re_sort(&mut self, key: SortKey, order: SortOrder) {
         let current_file = self.current_path().map(|p| p.to_path_buf());
         self.sort_key = key;
         self.sort_order = order;
         self.scan_and_sort();
-        // Try to keep the same file selected.
+        if let Some(path) = current_file {
+            self.set_current(&path);
+        }
+    }
+
+    pub fn set_group_by(&mut self, group: GroupBy) {
+        let current_file = self.current_path().map(|p| p.to_path_buf());
+        self.group_by = group;
+        self.scan_and_sort();
         if let Some(path) = current_file {
             self.set_current(&path);
         }
@@ -192,6 +251,12 @@ impl FileList {
     pub fn prev_image_dir(&self) -> Option<PathBuf> {
         prev_image_dir_from(&self.directory)
     }
+}
+
+fn file_modified_time(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 fn sorted_child_dirs(dir: &Path) -> Vec<PathBuf> {

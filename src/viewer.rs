@@ -4,8 +4,8 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::cache::ImageCache;
-use crate::file_list::{FileList, SortKey, SortOrder};
-use crate::settings::{FitModeSetting, Settings, SortKeySetting, SortOrderSetting};
+use crate::file_list::{FileList, GroupBy, SortKey, SortOrder};
+use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
 
 /// Decoded image data ready to be uploaded to GPU.
 pub struct DecodedImage {
@@ -204,6 +204,7 @@ impl ViewerApp {
 
         if let Some(parent) = canonical.parent() {
             let mut file_list = FileList::from_directory(parent);
+            file_list.set_group_by(self.saved_group_by());
             file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
             file_list.set_current(&canonical);
             self.file_list = Some(file_list);
@@ -212,9 +213,9 @@ impl ViewerApp {
         self.load_current_image();
     }
 
-    /// Open a directory and show its first image.
     fn open_directory(&mut self, dir: &Path) {
         let mut file_list = FileList::from_directory(dir);
+        file_list.set_group_by(self.saved_group_by());
         file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
         if file_list.file_count() > 0 {
             self.file_list = Some(file_list);
@@ -251,8 +252,19 @@ impl ViewerApp {
                 SortOrder::Ascending => SortOrderSetting::Ascending,
                 SortOrder::Descending => SortOrderSetting::Descending,
             };
+            self.settings.group_by = match fl.group_by {
+                GroupBy::Off => GroupBySetting::Off,
+                GroupBy::ModifiedDate => GroupBySetting::ModifiedDate,
+            };
         }
         self.settings.save();
+    }
+
+    fn saved_group_by(&self) -> GroupBy {
+        match self.settings.group_by {
+            GroupBySetting::Off => GroupBy::Off,
+            GroupBySetting::ModifiedDate => GroupBy::ModifiedDate,
+        }
     }
 
     /// Load the current image from the file list (using cache if available).
@@ -623,8 +635,21 @@ impl ViewerApp {
                     ui.separator();
 
                     ui.label(egui::RichText::new("グループ化").size(12.0));
-                    ui.add_enabled(false, egui::Button::new("名前"));
-                    ui.add_enabled(false, egui::Button::new("更新日時"));
+                    {
+                        let current_group = self.file_list.as_ref().map(|fl| fl.group_by).unwrap_or(GroupBy::Off);
+                        if ui.radio_value(&mut current_group.clone(), GroupBy::Off, "オフ").changed() {
+                            if let Some(fl) = &mut self.file_list {
+                                fl.set_group_by(GroupBy::Off);
+                            }
+                            self.save_settings();
+                        }
+                        if ui.radio_value(&mut current_group.clone(), GroupBy::ModifiedDate, "更新日時").changed() {
+                            if let Some(fl) = &mut self.file_list {
+                                fl.set_group_by(GroupBy::ModifiedDate);
+                            }
+                            self.save_settings();
+                        }
+                    }
 
                     ui.separator();
 
