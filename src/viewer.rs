@@ -3,10 +3,12 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use crate::cache::ImageCache;
-use crate::file_list::{FileList, GroupBy, SortKey, SortOrder};
+use crate::file_list::{self, FileList, GroupBy, SortKey, SortOrder};
 use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
+use crate::video_player::{PlaybackState, VideoPlayer};
 
 /// Decoded image data ready to be uploaded to GPU.
 pub struct DecodedImage {
@@ -347,14 +349,20 @@ pub struct ViewerApp {
     show_titlebar_menu: bool,
     titlebar_menu_pos: egui::Pos2,
     is_maximized: bool,
+    video_player: Option<VideoPlayer>,
+    video_texture_id: Option<egui::TextureId>,
+    video_wgpu_texture: Option<wgpu::Texture>,
+    video_size: Option<[u32; 2]>,
     settings: Settings,
     render_state: Arc<eframe::egui_wgpu::RenderState>,
+    ipc_rx: mpsc::Receiver<PathBuf>,
 }
 
 impl ViewerApp {
     pub fn new(
         initial_path: Option<PathBuf>,
         render_state: Arc<eframe::egui_wgpu::RenderState>,
+        ipc_rx: mpsc::Receiver<PathBuf>,
     ) -> Self {
         let settings = Settings::load();
         let mut transform = ViewTransform::default();
@@ -379,8 +387,13 @@ impl ViewerApp {
             show_titlebar_menu: false,
             titlebar_menu_pos: egui::Pos2::ZERO,
             is_maximized: false,
+            video_player: None,
+            video_texture_id: None,
+            video_wgpu_texture: None,
+            video_size: None,
             settings,
             render_state,
+            ipc_rx,
         };
 
         if let Some(path) = initial_path {
@@ -396,6 +409,23 @@ impl ViewerApp {
             renderer.free_texture(&id);
         }
         self.wgpu_texture = None;
+        self.free_video_texture();
+    }
+
+    fn free_video_texture(&mut self) {
+        if let Some(id) = self.video_texture_id.take() {
+            let mut renderer = self.render_state.renderer.write();
+            renderer.free_texture(&id);
+        }
+        self.video_wgpu_texture = None;
+    }
+
+    fn stop_video(&mut self) {
+        if let Some(mut player) = self.video_player.take() {
+            player.stop();
+        }
+        self.free_video_texture();
+        self.video_size = None;
     }
 
     /// Open a file and build the file list from its directory.
@@ -498,9 +528,10 @@ impl ViewerApp {
         }
     }
 
-    /// Load the current image from the file list (using cache if available).
+    /// Load the current file (image or video) from the file list.
     fn load_current_image(&mut self) {
         self.free_current_texture();
+        self.stop_video();
         self.image_size = None;
         self.error_message = None;
         self.transform.reset_zoom_pan();
@@ -513,27 +544,39 @@ impl ViewerApp {
             None => return,
         };
 
-        // Try cache first, then load directly.
-        match self.cache.get(&path) {
-            Some(pixels) => {
-                self.image_size = Some(pixels.size);
+        if file_list::is_video_file(&path) {
+            match VideoPlayer::open(&path) {
+                Ok(player) => {
+                    player.set_volume(self.settings.volume);
+                    self.video_size = Some(player.video_size);
+                    self.image_size = Some([player.video_size[0] as usize, player.video_size[1] as usize]);
+                    self.video_player = Some(player);
+                }
+                Err(e) => {
+                    log::error!("{}", e);
+                    self.error_message = Some(e);
+                }
             }
-            None => {
-                match DecodedImage::load(&path) {
-                    Ok(decoded) => {
-                        self.image_size = Some(decoded.pixels.size);
-                        self.cache.insert(path, decoded.pixels);
-                    }
-                    Err(e) => {
-                        log::error!("{}", e);
-                        self.error_message = Some(e);
+        } else {
+            match self.cache.get(&path) {
+                Some(pixels) => {
+                    self.image_size = Some(pixels.size);
+                }
+                None => {
+                    match DecodedImage::load(&path) {
+                        Ok(decoded) => {
+                            self.image_size = Some(decoded.pixels.size);
+                            self.cache.insert(path, decoded.pixels);
+                        }
+                        Err(e) => {
+                            log::error!("{}", e);
+                            self.error_message = Some(e);
+                        }
                     }
                 }
             }
+            self.start_preload();
         }
-
-        // Trigger preloading of nearby images.
-        self.start_preload();
     }
 
     /// Start preloading images around the current index.
@@ -581,7 +624,25 @@ impl ViewerApp {
                     fl.file_count()
                 );
                 let mut title = format!("{}/{} ({})", parent_name, filename, position);
-                if self.slideshow_active {
+                if let Some(player) = &self.video_player {
+                    let state_str = match player.state {
+                        PlaybackState::Playing => "再生中",
+                        PlaybackState::Paused => "一時停止",
+                        PlaybackState::Finished => "終了",
+                    };
+                    let vol = player.volume();
+                    let pos = player.current_pts().max(0.0);
+                    let dur = player.duration.max(0.0);
+                    let fmt = |s: f64| -> String {
+                        let m = (s as u64) / 60;
+                        let sec = (s as u64) % 60;
+                        format!("{}:{:02}", m, sec)
+                    };
+                    title.push_str(&format!(
+                        " [{} Vol:{}%] [{} / {}]",
+                        state_str, vol, fmt(pos), fmt(dur)
+                    ));
+                } else if self.slideshow_active {
                     title.push_str(&format!(" <自動: {:.1}s>", self.slideshow_interval));
                 }
                 return title;
@@ -623,7 +684,8 @@ impl ViewerApp {
         let rect_center = response.rect.center();
 
         // Right-click drag: zoom by vertical movement.
-        if response.secondary_clicked() {
+        let secondary_pressed = response.ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+        if secondary_pressed && response.hovered() && !self.show_titlebar_menu {
             self.transform.right_drag_active = true;
             self.transform.right_drag_start_y = pointer_pos.y;
             self.transform.right_drag_start_zoom = self.transform.zoom;
@@ -646,20 +708,6 @@ impl ViewerApp {
             } else {
                 self.transform.right_drag_active = false;
             }
-        }
-
-        // Mouse wheel zoom.
-        let scroll_delta = response.ctx.input(|i| i.raw_scroll_delta.y);
-        if scroll_delta.abs() > 0.0 && response.hovered() {
-            let zoom_factor = (scroll_delta / 300.0).exp();
-            let new_zoom = (self.transform.zoom * zoom_factor).clamp(0.1, 50.0);
-
-            let pointer_offset = pointer_pos - rect_center;
-            let old_zoom = self.transform.zoom;
-            self.transform.zoom = new_zoom;
-            let zoom_ratio = new_zoom / old_zoom;
-            self.transform.pan = self.transform.pan * zoom_ratio
-                + pointer_offset * (1.0 - zoom_ratio);
         }
 
         if response.double_clicked() {
@@ -696,29 +744,16 @@ impl ViewerApp {
         };
 
         let rect = response.rect;
-        let norm_x = if available.x > 0.0 {
-            ((mouse_pos.x - rect.center().x) / (available.x * 0.5)).clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
-        let norm_y = if available.y > 0.0 {
-            ((mouse_pos.y - rect.center().y) / (available.y * 0.5)).clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
+        let mouse_offset_x = mouse_pos.x - rect.center().x;
+        let mouse_offset_y = mouse_pos.y - rect.center().y;
 
-        let target_x = -norm_x * overflow_x * 0.5;
-        let target_y = -norm_y * overflow_y * 0.5;
-        let target = egui::vec2(target_x, target_y);
+        let mult_x = if available.x > 0.0 { (overflow_x / available.x).max(1.0) } else { 1.0 };
+        let mult_y = if available.y > 0.0 { (overflow_y / available.y).max(1.0) } else { 1.0 };
 
-        let dt = response.ctx.input(|i| i.stable_dt).min(0.1);
-        let speed = 8.0;
-        let t = (speed * dt).min(1.0);
-        self.transform.pan = self.transform.pan + (target - self.transform.pan) * t;
+        let pan_x = (-mouse_offset_x * mult_x).clamp(-overflow_x * 0.5, overflow_x * 0.5);
+        let pan_y = (-mouse_offset_y * mult_y).clamp(-overflow_y * 0.5, overflow_y * 0.5);
 
-        if (target - self.transform.pan).length() > 0.5 {
-            response.ctx.request_repaint();
-        }
+        self.transform.pan = egui::vec2(pan_x, pan_y);
     }
 
     fn navigate_prev_folder(&mut self) {
@@ -1100,6 +1135,22 @@ impl eframe::App for ViewerApp {
         // Poll cache for completed preloads.
         self.cache.poll();
 
+        // Poll IPC for file open requests from other instances.
+        if let Ok(path) = self.ipc_rx.try_recv() {
+            self.open_file(&path);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                unsafe {
+                    let fg = GetForegroundWindow();
+                    if !fg.is_invalid() {
+                        let _ = SetForegroundWindow(fg);
+                    }
+                }
+            }
+        }
+
         // Handle window edge resize.
         self.handle_window_resize(ctx);
 
@@ -1115,11 +1166,19 @@ impl eframe::App for ViewerApp {
 
         // Handle keyboard input.
         {
+            let is_video = self.video_player.is_some();
             let nav = ctx.input(|i| {
+                let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
                 if i.key_pressed(egui::Key::ArrowRight) {
+                    if is_video && !ctrl {
+                        return Some("video_skip_forward");
+                    }
                     return Some("right");
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) {
+                    if is_video && !ctrl {
+                        return Some("video_skip_backward");
+                    }
                     return Some("left");
                 }
                 if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::PageUp) {
@@ -1131,6 +1190,22 @@ impl eframe::App for ViewerApp {
                 None
             });
             match nav {
+                Some("video_skip_forward") => {
+                    if let Some(player) = &mut self.video_player {
+                        let current = player.current_pts();
+                        if player.seek(current + 5.0).is_err() {
+                            self.next_image();
+                        }
+                    }
+                }
+                Some("video_skip_backward") => {
+                    if let Some(player) = &mut self.video_player {
+                        let current = player.current_pts();
+                        if player.seek(current - 5.0).is_err() {
+                            self.prev_image();
+                        }
+                    }
+                }
                 Some("right") => self.next_image(),
                 Some("left") => self.prev_image(),
                 Some("prev_folder") => self.navigate_prev_folder(),
@@ -1178,8 +1253,13 @@ impl eframe::App for ViewerApp {
             });
             if let Some(delta) = interval_change {
                 self.slideshow_interval = (self.slideshow_interval + delta).clamp(1.0, 30.0);
-                // Round to 1 decimal to avoid floating point drift.
                 self.slideshow_interval = (self.slideshow_interval * 10.0).round() / 10.0;
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                if let Some(player) = &mut self.video_player {
+                    player.toggle_pause();
+                }
             }
         }
 
@@ -1212,7 +1292,13 @@ impl eframe::App for ViewerApp {
                     return;
                 }
 
-                // Get the current image path to look up in cache.
+                // Video playback path
+                if self.video_player.is_some() {
+                    self.render_video_frame(ui, available);
+                    return;
+                }
+
+                // Image display path
                 let current_path = self
                     .file_list
                     .as_ref()
@@ -1291,5 +1377,128 @@ impl eframe::App for ViewerApp {
                     });
                 }
             });
+    }
+}
+
+impl ViewerApp {
+    fn render_video_frame(&mut self, ui: &mut egui::Ui, available: egui::Vec2) {
+        let new_frame = self.video_player.as_mut().and_then(|p| {
+            let f = p.poll_frame()?;
+            Some((f.rgba.clone(), f.width, f.height))
+        });
+
+        if let Some((rgba, width, height)) = new_frame {
+            self.upload_video_frame(&rgba, width, height);
+        }
+
+        let tex_id = match self.video_texture_id {
+            Some(id) => id,
+            None => return,
+        };
+        let img_size = match self.image_size {
+            Some(s) => s,
+            None => return,
+        };
+
+        let fit = self.fit_scale(available);
+        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
+            (
+                img_size[1] as f32 * fit * self.transform.zoom,
+                img_size[0] as f32 * fit * self.transform.zoom,
+            )
+        } else {
+            (
+                img_size[0] as f32 * fit * self.transform.zoom,
+                img_size[1] as f32 * fit * self.transform.zoom,
+            )
+        };
+
+        let center = ui.available_rect_before_wrap().center();
+        let offset = self.transform.pan;
+        let image_rect = egui::Rect::from_center_size(
+            center + offset,
+            egui::vec2(display_w, display_h),
+        );
+
+        let (response, painter) =
+            ui.allocate_painter(available, egui::Sense::click_and_drag());
+
+        let uvs = self.transform.rotated_uvs();
+        let mut mesh = egui::Mesh::with_texture(tex_id);
+        let tint = egui::Color32::WHITE;
+        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.left_top(), uv: uvs[0], color: tint });
+        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.right_top(), uv: uvs[1], color: tint });
+        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.right_bottom(), uv: uvs[2], color: tint });
+        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.left_bottom(), uv: uvs[3], color: tint });
+        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+        painter.add(egui::Shape::mesh(mesh));
+
+        self.handle_zoom_input(&response, available);
+        self.handle_mouse_pan(&response, available);
+
+        // Mouse wheel volume control during video playback
+        let scroll_delta = response.ctx.input(|i| i.raw_scroll_delta.y);
+        if scroll_delta.abs() > 0.0 && response.hovered() {
+            if let Some(player) = &self.video_player {
+                let current = player.volume() as i32;
+                let step = if scroll_delta > 0.0 { 5 } else { -5 };
+                let new_vol = (current + step).clamp(0, 200) as u16;
+                player.set_volume(new_vol);
+                self.settings.volume = new_vol;
+                self.settings.save();
+            }
+        }
+
+        if self.video_player.as_ref().is_some_and(|p| matches!(p.state, PlaybackState::Playing)) {
+            response.ctx.request_repaint();
+        }
+    }
+
+    fn upload_video_frame(&mut self, rgba: &[u8], width: u32, height: u32) {
+        let render_state = Arc::clone(&self.render_state);
+        let device = &render_state.device;
+        let queue = &render_state.queue;
+
+        let need_recreate = match &self.video_wgpu_texture {
+            Some(tex) => tex.width() != width || tex.height() != height,
+            None => true,
+        };
+
+        if need_recreate {
+            self.free_video_texture();
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("video_frame"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut renderer = render_state.renderer.write();
+            let tex_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
+            self.video_texture_id = Some(tex_id);
+            self.video_wgpu_texture = Some(texture);
+        }
+
+        if let Some(texture) = &self.video_wgpu_texture {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+        }
     }
 }

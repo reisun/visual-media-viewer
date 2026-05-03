@@ -84,10 +84,13 @@ impl ImageCache {
     }
 
     /// Start background preloading of the given paths.
-    /// Skips paths that are already cached or pending.
+    /// Skips paths that are already cached, pending, or video files.
     pub fn preload(&mut self, paths: Vec<PathBuf>) {
         for path in paths {
             if self.entries.contains_key(&path) || self.pending.contains(&path) {
+                continue;
+            }
+            if crate::file_list::is_video_file(&path) {
                 continue;
             }
 

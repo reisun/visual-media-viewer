@@ -1,13 +1,21 @@
 FROM rust:1.95-bookworm
 
-# Install mingw-w64 for Windows cross-compilation
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends mingw-w64 && \
+    apt-get install -y --no-install-recommends mingw-w64 wget unzip clang libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Add Windows GNU target
+# Download pre-built FFmpeg LGPL shared for Windows x86_64
+RUN wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip \
+    -O /tmp/ffmpeg.zip && \
+    unzip -q /tmp/ffmpeg.zip -d /opt && \
+    ls /opt/ && \
+    mv /opt/ffmpeg-n7.1-* /opt/ffmpeg-win64 && \
+    rm /tmp/ffmpeg.zip
+
+ENV FFMPEG_DIR=/opt/ffmpeg-win64
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+
 RUN rustup target add x86_64-pc-windows-gnu
 
 WORKDIR /app
-
-CMD ["cargo", "build", "--release", "--target", "x86_64-pc-windows-gnu"]
+CMD ["bash", "scripts/docker-build.sh"]

@@ -93,8 +93,8 @@ MassiGraを超える高レスポンス画像・動画ビューア。Phase 1 は�
 - [x] PgUp/PgDn 親ディレクトリ/子ディレクトリ移動
 - [x] グループ化（オフ/更新日時）
 
-### 未着手（Phase 3 以降）
-- 動画再生（MP4 / AVI / FFmpeg連携）
+### 未着手
+- （なし）
 
 ## Phase 3A: HEIC対応・パン改善
 
@@ -102,4 +102,21 @@ MassiGraを超える高レスポンス画像・動画ビューア。Phase 1 は�
 - [x] HEIC/HEIF フォーマット対応 — Windows WIC API経由（HEIF Image Extensions必要）
 - [x] image crateデコード失敗時のWICフォールバック
 - [x] 拡大時マウス位置連動パン — マウス位置に応じて表示領域がスムーズに追従
+
+## Phase 4: 動画再生対応
+
+### 機能一覧
+- [x] FFmpeg LGPL DLL動的リンク — MITライセンス維持
+- [x] 動画フォーマット対応 — MP4, WebM, MKV, AVI, MOV, WMV, FLV, M4V, MPG, MPEG, TS
+- [x] バックグラウンドデコードスレッド — bounded frame queue (3フレーム先読み)
+- [x] PTS同期フレーム表示 — wgpu テクスチャへの直接アップロード
+- [x] Space キーで再生/一時停止
+- [x] ファイルリスト統合 — 画像と動画が混在ナビ���ーション可能
+- [x] プリロード最適化 — 動画ファイルはキャッシュプリロードをスキップ
+- [x] タイトルバーに再生状態表示
+
+### 未着手（Phase 5 以降）
+- 音声再生（cpal crate + FFmpegオーディオデコード）
+- シーク操作
+- 動画ループ再生
 

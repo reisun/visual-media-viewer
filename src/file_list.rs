@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "heic", "heif"];
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "heic", "heif"];
+const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mkv", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ts"];
 
 #[cfg(target_os = "windows")]
 mod win_sort {
@@ -39,19 +40,40 @@ fn is_supported_image(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| {
             let lower = ext.to_ascii_lowercase();
-            SUPPORTED_EXTENSIONS.contains(&lower.as_str())
+            SUPPORTED_IMAGE_EXTENSIONS.contains(&lower.as_str())
         })
         .unwrap_or(false)
 }
 
-/// Returns true if a directory contains at least one supported image file.
+/// Returns true if the path has a supported video extension (case-insensitive).
+fn is_supported_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let lower = ext.to_ascii_lowercase();
+            SUPPORTED_VIDEO_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// Returns true if the path is a supported media file (image or video).
+fn is_supported_media(path: &Path) -> bool {
+    is_supported_image(path) || is_supported_video(path)
+}
+
+/// Public helper: returns true if the given path is a video file.
+pub fn is_video_file(path: &Path) -> bool {
+    is_supported_video(path)
+}
+
+/// Returns true if a directory contains at least one supported media file (image or video).
 pub fn directory_has_images(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
             .any(|e| {
                 let p = e.path();
-                p.is_file() && is_supported_image(&p)
+                p.is_file() && is_supported_media(&p)
             }),
         Err(_) => false,
     }
@@ -146,7 +168,7 @@ impl FileList {
             Ok(entries) => entries
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
-                .filter(|path| path.is_file() && is_supported_image(path))
+                .filter(|path| path.is_file() && is_supported_media(path))
                 .collect(),
             Err(e) => {
                 log::warn!("Failed to read directory {}: {}", self.directory.display(), e);
@@ -430,6 +452,25 @@ mod tests {
         assert!(is_supported_image(Path::new("photo.TIF")));
         assert!(!is_supported_image(Path::new("photo.txt")));
         assert!(!is_supported_image(Path::new("noext")));
+    }
+
+    #[test]
+    fn test_is_supported_video() {
+        assert!(is_supported_video(Path::new("clip.mp4")));
+        assert!(is_supported_video(Path::new("clip.MP4")));
+        assert!(is_supported_video(Path::new("clip.mkv")));
+        assert!(is_supported_video(Path::new("clip.avi")));
+        assert!(is_supported_video(Path::new("clip.mov")));
+        assert!(is_supported_video(Path::new("clip.webm")));
+        assert!(!is_supported_video(Path::new("photo.jpg")));
+        assert!(!is_supported_video(Path::new("noext")));
+    }
+
+    #[test]
+    fn test_is_supported_media() {
+        assert!(is_supported_media(Path::new("photo.jpg")));
+        assert!(is_supported_media(Path::new("clip.mp4")));
+        assert!(!is_supported_media(Path::new("doc.txt")));
     }
 
     #[test]

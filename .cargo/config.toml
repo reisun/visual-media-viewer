@@ -1,0 +1,2 @@
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-L", "/opt/ffmpeg-win64/lib"]
