@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cache::ImageCache;
 use crate::file_list::{self, FileList, SortKey, SortOrder};
+use crate::settings::{FitModeSetting, Settings, SortKeySetting, SortOrderSetting};
 
 /// Decoded image data ready to be uploaded to GPU.
 pub struct DecodedImage {
@@ -64,11 +65,15 @@ impl Default for ViewTransform {
 }
 
 impl ViewTransform {
-    fn reset(&mut self) {
+    fn reset_zoom_pan(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
-        self.rotation = 0;
         self.right_drag_active = false;
+    }
+
+    fn reset_all(&mut self) {
+        self.reset_zoom_pan();
+        self.rotation = 0;
     }
 
     fn rotate_cw(&mut self) {
@@ -149,24 +154,35 @@ pub struct ViewerApp {
     titlebar_menu_pos: egui::Pos2,
     /// Whether the window is currently maximized (tracked for toggle).
     is_maximized: bool,
+    /// Persisted settings.
+    settings: Settings,
 }
 
 impl ViewerApp {
     pub fn new(initial_path: Option<PathBuf>) -> Self {
+        let settings = Settings::load();
+        let mut transform = ViewTransform::default();
+        transform.rotation = settings.rotation;
+        let fit_mode = match settings.fit_mode {
+            FitModeSetting::FitToWindow => FitMode::FitToWindow,
+            FitModeSetting::OriginalSize => FitMode::OriginalSize,
+        };
+
         let mut app = Self {
             texture: None,
             image_size: None,
             file_list: None,
             cache: ImageCache::new(10),
-            transform: ViewTransform::default(),
+            transform,
             error_message: None,
             slideshow_active: false,
             slideshow_interval: 3.0,
             slideshow_last_advance: 0.0,
-            fit_mode: FitMode::FitToWindow,
+            fit_mode,
             show_titlebar_menu: false,
             titlebar_menu_pos: egui::Pos2::ZERO,
             is_maximized: false,
+            settings,
         };
 
         if let Some(path) = initial_path {
@@ -186,9 +202,9 @@ impl ViewerApp {
             }
         };
 
-        // Build file list from the directory containing this file.
         if let Some(parent) = canonical.parent() {
             let mut file_list = FileList::from_directory(parent);
+            file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
             file_list.set_current(&canonical);
             self.file_list = Some(file_list);
         }
@@ -198,20 +214,53 @@ impl ViewerApp {
 
     /// Open a directory and show its first image.
     fn open_directory(&mut self, dir: &Path) {
-        let file_list = FileList::from_directory(dir);
+        let mut file_list = FileList::from_directory(dir);
+        file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
         if file_list.file_count() > 0 {
             self.file_list = Some(file_list);
             self.load_current_image();
         }
     }
 
+    fn saved_sort_key(&self) -> SortKey {
+        match self.settings.sort_key {
+            SortKeySetting::Name => SortKey::Name,
+            SortKeySetting::ModifiedDate => SortKey::ModifiedDate,
+        }
+    }
+
+    fn saved_sort_order(&self) -> SortOrder {
+        match self.settings.sort_order {
+            SortOrderSetting::Ascending => SortOrder::Ascending,
+            SortOrderSetting::Descending => SortOrder::Descending,
+        }
+    }
+
+    fn save_settings(&mut self) {
+        self.settings.rotation = self.transform.rotation;
+        self.settings.fit_mode = match self.fit_mode {
+            FitMode::FitToWindow => FitModeSetting::FitToWindow,
+            FitMode::OriginalSize => FitModeSetting::OriginalSize,
+        };
+        if let Some(fl) = &self.file_list {
+            self.settings.sort_key = match fl.sort_key {
+                SortKey::Name => SortKeySetting::Name,
+                SortKey::ModifiedDate => SortKeySetting::ModifiedDate,
+            };
+            self.settings.sort_order = match fl.sort_order {
+                SortOrder::Ascending => SortOrderSetting::Ascending,
+                SortOrder::Descending => SortOrderSetting::Descending,
+            };
+        }
+        self.settings.save();
+    }
+
     /// Load the current image from the file list (using cache if available).
     fn load_current_image(&mut self) {
-        // Clear previous texture so it gets recreated.
         self.texture = None;
         self.image_size = None;
         self.error_message = None;
-        self.transform.reset();
+        self.transform.reset_zoom_pan();
 
         let path = match &self.file_list {
             Some(fl) => match fl.current_path() {
@@ -370,9 +419,8 @@ impl ViewerApp {
                 + pointer_offset * (1.0 - zoom_ratio);
         }
 
-        // Double-click to reset fit.
         if response.double_clicked() {
-            self.transform.reset();
+            self.transform.reset_all();
         }
     }
 
@@ -573,17 +621,18 @@ impl ViewerApp {
                     {
                         let current_key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
                         if ui.radio_value(&mut current_key.clone(), SortKey::Name, "名前").changed() {
-                            // Actually apply.
                             if let Some(fl) = &mut self.file_list {
                                 let order = fl.sort_order;
                                 fl.re_sort(SortKey::Name, order);
                             }
+                            self.save_settings();
                         }
                         if ui.radio_value(&mut current_key.clone(), SortKey::ModifiedDate, "更新日時").changed() {
                             if let Some(fl) = &mut self.file_list {
                                 let order = fl.sort_order;
                                 fl.re_sort(SortKey::ModifiedDate, order);
                             }
+                            self.save_settings();
                         }
                     }
 
@@ -595,12 +644,14 @@ impl ViewerApp {
                                 let key = fl.sort_key;
                                 fl.re_sort(key, SortOrder::Ascending);
                             }
+                            self.save_settings();
                         }
                         if ui.radio_value(&mut current_order.clone(), SortOrder::Descending, "降順").changed() {
                             if let Some(fl) = &mut self.file_list {
                                 let key = fl.sort_key;
                                 fl.re_sort(key, SortOrder::Descending);
                             }
+                            self.save_settings();
                         }
                     }
 
@@ -647,6 +698,7 @@ impl ViewerApp {
 
                     ui.label(egui::RichText::new("回転オプション").size(12.0));
                     {
+                        let prev_rot = self.transform.rotation;
                         let mut rot = self.transform.rotation;
                         if ui.radio_value(&mut rot, 0, "オフ").changed() {
                             self.transform.rotation = 0;
@@ -659,6 +711,9 @@ impl ViewerApp {
                         }
                         if ui.radio_value(&mut rot, 180, "180度回転").changed() {
                             self.transform.rotation = 180;
+                        }
+                        if self.transform.rotation != prev_rot {
+                            self.save_settings();
                         }
                     }
 
@@ -687,11 +742,13 @@ impl ViewerApp {
                             self.fit_mode = FitMode::OriginalSize;
                             self.transform.zoom = 1.0;
                             self.transform.pan = egui::Vec2::ZERO;
+                            self.save_settings();
                         }
                         if ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる").changed() {
                             self.fit_mode = FitMode::FitToWindow;
                             self.transform.zoom = 1.0;
                             self.transform.pan = egui::Vec2::ZERO;
+                            self.save_settings();
                         }
                     }
                 });
@@ -770,6 +827,7 @@ impl eframe::App for ViewerApp {
                 } else {
                     self.transform.rotate_ccw();
                 }
+                self.save_settings();
             }
 
             // Slideshow: S = toggle, +/= = increase interval, - = decrease interval.

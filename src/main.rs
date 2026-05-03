@@ -2,6 +2,7 @@
 
 mod cache;
 mod file_list;
+mod settings;
 mod viewer;
 
 use eframe::egui;
@@ -13,7 +14,6 @@ fn configure_fonts(ctx: &egui::Context) {
 
     // Try to load a Japanese system font from Windows.
     let font_paths = [
-        "C:/Windows/Fonts/meiryo.ttc",
         "C:/Windows/Fonts/msgothic.ttc",
         "C:/Windows/Fonts/YuGothR.ttc",
     ];
