@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::cache::ImageCache;
-use crate::file_list::FileList;
+use crate::file_list::{self, FileList, SortKey, SortOrder};
 
 /// Decoded image data ready to be uploaded to GPU.
 pub struct DecodedImage {
@@ -26,6 +26,13 @@ impl DecodedImage {
         let pixels = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
         Ok(Self { pixels })
     }
+}
+
+/// Fit display mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FitMode {
+    FitToWindow,
+    OriginalSize,
 }
 
 /// Zoom, pan, and rotation state for the viewer.
@@ -73,7 +80,6 @@ impl ViewTransform {
     }
 
     /// Get UV coordinates for the four corners based on rotation.
-    /// Returns (top-left, top-right, bottom-right, bottom-left) UV positions.
     fn rotated_uvs(&self) -> [egui::Pos2; 4] {
         match self.rotation {
             0 => [
@@ -135,12 +141,14 @@ pub struct ViewerApp {
     slideshow_interval: f64,
     /// Timestamp of the last slideshow advance.
     slideshow_last_advance: f64,
-    /// Whether to show the property overlay.
-    show_properties: bool,
-    /// Right-click context menu state.
-    right_press_pos: Option<egui::Pos2>,
-    show_context_menu: bool,
-    context_menu_pos: egui::Pos2,
+    /// Fit display mode.
+    fit_mode: FitMode,
+    /// Whether the title bar right-click menu is open.
+    show_titlebar_menu: bool,
+    /// Position where the title bar menu should appear.
+    titlebar_menu_pos: egui::Pos2,
+    /// Whether the window is currently maximized (tracked for toggle).
+    is_maximized: bool,
 }
 
 impl ViewerApp {
@@ -155,10 +163,10 @@ impl ViewerApp {
             slideshow_active: false,
             slideshow_interval: 3.0,
             slideshow_last_advance: 0.0,
-            show_properties: false,
-            right_press_pos: None,
-            show_context_menu: false,
-            context_menu_pos: egui::Pos2::ZERO,
+            fit_mode: FitMode::FitToWindow,
+            show_titlebar_menu: false,
+            titlebar_menu_pos: egui::Pos2::ZERO,
+            is_maximized: false,
         };
 
         if let Some(path) = initial_path {
@@ -188,6 +196,15 @@ impl ViewerApp {
         self.load_current_image();
     }
 
+    /// Open a directory and show its first image.
+    fn open_directory(&mut self, dir: &Path) {
+        let file_list = FileList::from_directory(dir);
+        if file_list.file_count() > 0 {
+            self.file_list = Some(file_list);
+            self.load_current_image();
+        }
+    }
+
     /// Load the current image from the file list (using cache if available).
     fn load_current_image(&mut self) {
         // Clear previous texture so it gets recreated.
@@ -208,8 +225,6 @@ impl ViewerApp {
         match self.cache.get(&path) {
             Some(pixels) => {
                 self.image_size = Some(pixels.size);
-                // Texture will be created in update() when ctx is available.
-                // Store pixels temporarily via the cache (already there).
             }
             None => {
                 match DecodedImage::load(&path) {
@@ -255,47 +270,65 @@ impl ViewerApp {
         }
     }
 
-    /// Get the current filename for the title bar.
-    fn current_filename(&self) -> Option<String> {
-        self.file_list
-            .as_ref()
-            .and_then(|fl| fl.current_path())
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+    /// Build the title text: 親フォルダ/ファイル名 (現在 / 画像件数) [<自動: X.Xs>]
+    fn title_text(&self) -> String {
+        if let Some(fl) = &self.file_list {
+            if let Some(path) = fl.current_path() {
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let parent_name = fl
+                    .directory()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let position = format!(
+                    "{} / {}",
+                    fl.current_index() + 1,
+                    fl.file_count()
+                );
+                let mut title = format!("{}/{} ({})", parent_name, filename, position);
+                if self.slideshow_active {
+                    title.push_str(&format!(" <自動: {:.1}s>", self.slideshow_interval));
+                }
+                return title;
+            }
+        }
+        "Visual Media Viewer".to_string()
     }
 
     /// Compute the fit-to-window scale for the current image given available size.
     /// Takes rotation into account (90/270 swaps dimensions).
+    /// Returns 1.0 in OriginalSize mode.
     fn fit_scale(&self, available: egui::Vec2) -> f32 {
-        if let Some(size) = self.image_size {
-            let (img_w, img_h) = if self.transform.is_rotated_90_or_270() {
-                (size[1] as f32, size[0] as f32)
-            } else {
-                (size[0] as f32, size[1] as f32)
-            };
-            if img_w > 0.0 && img_h > 0.0 {
-                let scale_x = available.x / img_w;
-                let scale_y = available.y / img_h;
-                scale_x.min(scale_y)
-            } else {
-                1.0
+        match self.fit_mode {
+            FitMode::OriginalSize => 1.0,
+            FitMode::FitToWindow => {
+                if let Some(size) = self.image_size {
+                    let (img_w, img_h) = if self.transform.is_rotated_90_or_270() {
+                        (size[1] as f32, size[0] as f32)
+                    } else {
+                        (size[0] as f32, size[1] as f32)
+                    };
+                    if img_w > 0.0 && img_h > 0.0 {
+                        let scale_x = available.x / img_w;
+                        let scale_y = available.y / img_h;
+                        scale_x.min(scale_y)
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
             }
-        } else {
-            1.0
         }
     }
 
-    /// Handle zoom interactions (right-click drag, scroll wheel, double-click)
-    /// and detect right-click short press for context menu.
-    fn handle_zoom_input(&mut self, response: &egui::Response, available_size: egui::Vec2) {
+    /// Handle zoom interactions (right-click drag, scroll wheel, double-click).
+    fn handle_zoom_input(&mut self, response: &egui::Response, _available_size: egui::Vec2) {
         let pointer_pos = response.hover_pos().unwrap_or(response.rect.center());
         let rect_center = response.rect.center();
-
-        // Track right-click press position for context menu detection.
-        let secondary_pressed = response.ctx.input(|i| i.pointer.secondary_pressed());
-        if secondary_pressed {
-            self.right_press_pos = Some(pointer_pos);
-        }
 
         // Right-click drag: zoom by vertical movement.
         if response.secondary_clicked() {
@@ -319,14 +352,6 @@ impl ViewerApp {
                 self.transform.pan = self.transform.pan * zoom_ratio
                     + pointer_offset * (1.0 - zoom_ratio);
             } else {
-                // Right button released: check if it was a short press (no drag).
-                if let Some(press_pos) = self.right_press_pos.take() {
-                    let dist = (pointer_pos - press_pos).length();
-                    if dist < 3.0 {
-                        self.show_context_menu = true;
-                        self.context_menu_pos = pointer_pos;
-                    }
-                }
                 self.transform.right_drag_active = false;
             }
         }
@@ -349,9 +374,329 @@ impl ViewerApp {
         if response.double_clicked() {
             self.transform.reset();
         }
+    }
 
-        // Ignore available_size; it's used indirectly via fit_scale.
-        let _ = available_size;
+    /// Navigate to the previous sibling folder.
+    fn navigate_prev_sibling_folder(&mut self) {
+        if let Some(fl) = &self.file_list {
+            if let Some((dirs, idx)) = fl.sibling_directories() {
+                // Search backwards from current index.
+                for i in (0..idx).rev() {
+                    if file_list::directory_has_images(&dirs[i]) {
+                        self.open_directory(&dirs[i]);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Navigate to the next sibling folder.
+    fn navigate_next_sibling_folder(&mut self) {
+        if let Some(fl) = &self.file_list {
+            if let Some((dirs, idx)) = fl.sibling_directories() {
+                // Search forwards from current index.
+                for i in (idx + 1)..dirs.len() {
+                    if file_list::directory_has_images(&dirs[i]) {
+                        self.open_directory(&dirs[i]);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Navigate up one directory level (PgUp).
+    fn navigate_parent_directory(&mut self) {
+        if let Some(fl) = &self.file_list {
+            let dir = fl.directory().to_path_buf();
+            if let Some(parent) = dir.parent() {
+                if file_list::directory_has_images(parent) {
+                    self.open_directory(parent);
+                }
+            }
+        }
+    }
+
+    /// Navigate into the first child subdirectory with images (PgDn).
+    fn navigate_child_directory(&mut self) {
+        if let Some(fl) = &self.file_list {
+            let children = fl.child_directories();
+            for child in children {
+                if file_list::directory_has_images(&child) {
+                    self.open_directory(&child);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Draw the custom title bar and return whether the menu should be shown.
+    fn draw_title_bar(&mut self, ctx: &egui::Context) {
+        let title_text = self.title_text();
+        let title_bar_height = 28.0;
+
+        egui::TopBottomPanel::top("title_bar")
+            .exact_height(title_bar_height)
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(45, 45, 45))
+                    .inner_margin(egui::Margin::symmetric(8, 0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    // Title text (takes remaining space).
+                    let title_response = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&title_text)
+                                .color(egui::Color32::from_gray(220))
+                                .size(13.0),
+                        )
+                        .sense(egui::Sense::click_and_drag()),
+                    );
+
+                    // Drag to move window on left-click drag.
+                    if title_response.dragged_by(egui::PointerButton::Primary) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+
+                    // Double-click to toggle maximize.
+                    if title_response.double_clicked() {
+                        self.is_maximized = !self.is_maximized;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
+                    }
+
+                    // Right-click on title bar to show menu.
+                    if title_response.secondary_clicked() {
+                        self.show_titlebar_menu = !self.show_titlebar_menu;
+                        if let Some(pos) = title_response.hover_pos() {
+                            self.titlebar_menu_pos = pos;
+                        }
+                    }
+
+                    // Right-align the window control buttons.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Close button.
+                        let close_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("\u{2715}").color(egui::Color32::from_gray(200)).size(14.0),
+                            )
+                            .frame(false),
+                        );
+                        if close_btn.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if close_btn.hovered() {
+                            ui.painter().rect_filled(
+                                close_btn.rect,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(232, 17, 35, 180),
+                            );
+                        }
+
+                        // Maximize/Restore button.
+                        let max_icon = if self.is_maximized { "\u{2752}" } else { "\u{25a1}" };
+                        let max_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(max_icon).color(egui::Color32::from_gray(200)).size(14.0),
+                            )
+                            .frame(false),
+                        );
+                        if max_btn.clicked() {
+                            self.is_maximized = !self.is_maximized;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
+                        }
+
+                        // Minimize button.
+                        let min_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("\u{2500}").color(egui::Color32::from_gray(200)).size(14.0),
+                            )
+                            .frame(false),
+                        );
+                        if min_btn.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                    });
+                });
+            });
+    }
+
+    /// Draw the title bar right-click menu.
+    fn draw_titlebar_menu(&mut self, ctx: &egui::Context) {
+        if !self.show_titlebar_menu {
+            return;
+        }
+
+        let menu_pos = self.titlebar_menu_pos;
+        let area_resp = egui::Area::new(egui::Id::new("titlebar_menu"))
+            .fixed_pos(menu_pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(220.0);
+
+                    // === リスト section ===
+                    ui.label(egui::RichText::new("リスト").strong().size(13.0));
+                    ui.separator();
+
+                    if ui.button("前のファイル").clicked() {
+                        self.show_titlebar_menu = false;
+                        // Defer action.
+                        if let Some(fl) = &mut self.file_list {
+                            if fl.prev() {
+                                // Will reload below.
+                            }
+                        }
+                        self.load_current_image();
+                    }
+
+                    if ui.button("次のファイル").clicked() {
+                        self.show_titlebar_menu = false;
+                        if let Some(fl) = &mut self.file_list {
+                            if fl.next() {
+                                // Will reload below.
+                            }
+                        }
+                        self.load_current_image();
+                    }
+
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("並び順（対象）").size(12.0));
+                    {
+                        let current_key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
+                        if ui.radio_value(&mut current_key.clone(), SortKey::Name, "名前").changed() {
+                            // Actually apply.
+                            if let Some(fl) = &mut self.file_list {
+                                let order = fl.sort_order;
+                                fl.re_sort(SortKey::Name, order);
+                            }
+                        }
+                        if ui.radio_value(&mut current_key.clone(), SortKey::ModifiedDate, "更新日時").changed() {
+                            if let Some(fl) = &mut self.file_list {
+                                let order = fl.sort_order;
+                                fl.re_sort(SortKey::ModifiedDate, order);
+                            }
+                        }
+                    }
+
+                    ui.label(egui::RichText::new("並び順（順序）").size(12.0));
+                    {
+                        let current_order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
+                        if ui.radio_value(&mut current_order.clone(), SortOrder::Ascending, "昇順").changed() {
+                            if let Some(fl) = &mut self.file_list {
+                                let key = fl.sort_key;
+                                fl.re_sort(key, SortOrder::Ascending);
+                            }
+                        }
+                        if ui.radio_value(&mut current_order.clone(), SortOrder::Descending, "降順").changed() {
+                            if let Some(fl) = &mut self.file_list {
+                                let key = fl.sort_key;
+                                fl.re_sort(key, SortOrder::Descending);
+                            }
+                        }
+                    }
+
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("グループ化").size(12.0));
+                    ui.add_enabled(false, egui::Button::new("名前"));
+                    ui.add_enabled(false, egui::Button::new("更新日時"));
+
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("スライドショー").size(12.0));
+                    {
+                        let label = if self.slideshow_active {
+                            "停止"
+                        } else {
+                            "開始"
+                        };
+                        if ui.button(label).clicked() {
+                            self.slideshow_active = !self.slideshow_active;
+                            if self.slideshow_active {
+                                self.slideshow_last_advance = ui.ctx().input(|i| i.time);
+                            }
+                            self.show_titlebar_menu = false;
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("時間:");
+                        let mut interval = self.slideshow_interval;
+                        let drag = egui::DragValue::new(&mut interval)
+                            .range(1.0..=30.0)
+                            .speed(0.1)
+                            .suffix("s")
+                            .fixed_decimals(1);
+                        if ui.add(drag).changed() {
+                            self.slideshow_interval = interval;
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    ui.label(egui::RichText::new("表示").strong().size(13.0));
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("回転オプション").size(12.0));
+                    {
+                        let mut rot = self.transform.rotation;
+                        if ui.radio_value(&mut rot, 0, "オフ").changed() {
+                            self.transform.rotation = 0;
+                        }
+                        if ui.radio_value(&mut rot, 270, "左回転").changed() {
+                            self.transform.rotation = 270;
+                        }
+                        if ui.radio_value(&mut rot, 90, "右回転").changed() {
+                            self.transform.rotation = 90;
+                        }
+                        if ui.radio_value(&mut rot, 180, "180度回転").changed() {
+                            self.transform.rotation = 180;
+                        }
+                    }
+
+                    ui.separator();
+
+                    if ui.button("ズームイン").clicked() {
+                        self.transform.zoom = (self.transform.zoom * 1.25).clamp(0.1, 50.0);
+                        self.show_titlebar_menu = false;
+                    }
+                    if ui.button("ズームアウト").clicked() {
+                        self.transform.zoom = (self.transform.zoom / 1.25).clamp(0.1, 50.0);
+                        self.show_titlebar_menu = false;
+                    }
+                    if ui.button("ズームリセット").clicked() {
+                        self.transform.zoom = 1.0;
+                        self.transform.pan = egui::Vec2::ZERO;
+                        self.show_titlebar_menu = false;
+                    }
+
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("フィット表示").size(12.0));
+                    {
+                        let mut mode = self.fit_mode;
+                        if ui.radio_value(&mut mode, FitMode::OriginalSize, "オリジナルサイズ").changed() {
+                            self.fit_mode = FitMode::OriginalSize;
+                            self.transform.zoom = 1.0;
+                            self.transform.pan = egui::Vec2::ZERO;
+                        }
+                        if ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる").changed() {
+                            self.fit_mode = FitMode::FitToWindow;
+                            self.transform.zoom = 1.0;
+                            self.transform.pan = egui::Vec2::ZERO;
+                        }
+                    }
+                });
+            });
+
+        // Close menu if clicking outside it.
+        let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+            && !area_resp.response.hovered();
+        if clicked_elsewhere {
+            self.show_titlebar_menu = false;
+        }
     }
 }
 
@@ -374,19 +719,33 @@ impl eframe::App for ViewerApp {
         {
             let nav = ctx.input(|i| {
                 if i.key_pressed(egui::Key::ArrowRight) {
-                    return Some(true);
+                    return Some("right");
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) {
-                    return Some(false);
+                    return Some("left");
+                }
+                if i.key_pressed(egui::Key::ArrowUp) {
+                    return Some("up");
+                }
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    return Some("down");
+                }
+                if i.key_pressed(egui::Key::PageUp) {
+                    return Some("pgup");
+                }
+                if i.key_pressed(egui::Key::PageDown) {
+                    return Some("pgdn");
                 }
                 None
             });
-            if let Some(forward) = nav {
-                if forward {
-                    self.next_image();
-                } else {
-                    self.prev_image();
-                }
+            match nav {
+                Some("right") => self.next_image(),
+                Some("left") => self.prev_image(),
+                Some("up") => self.navigate_prev_sibling_folder(),
+                Some("down") => self.navigate_next_sibling_folder(),
+                Some("pgup") => self.navigate_parent_directory(),
+                Some("pgdn") => self.navigate_child_directory(),
+                _ => {}
             }
 
             // Rotation: R = clockwise, Shift+R = counter-clockwise.
@@ -416,23 +775,20 @@ impl eframe::App for ViewerApp {
                 }
             }
 
+            // 0.1s increments for slideshow interval.
             let interval_change = ctx.input(|i| {
                 if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
-                    return Some(1.0_f64);
+                    return Some(0.1_f64);
                 }
                 if i.key_pressed(egui::Key::Minus) {
-                    return Some(-1.0_f64);
+                    return Some(-0.1_f64);
                 }
                 None
             });
             if let Some(delta) = interval_change {
                 self.slideshow_interval = (self.slideshow_interval + delta).clamp(1.0, 30.0);
-            }
-
-            // Property overlay: I = toggle.
-            let toggle_props = ctx.input(|i| i.key_pressed(egui::Key::I));
-            if toggle_props {
-                self.show_properties = !self.show_properties;
+                // Round to 1 decimal to avoid floating point drift.
+                self.slideshow_interval = (self.slideshow_interval * 10.0).round() / 10.0;
             }
         }
 
@@ -447,12 +803,11 @@ impl eframe::App for ViewerApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.01)));
         }
 
-        // Update window title.
-        if let Some(filename) = self.current_filename() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                format!("{} - Visual Media Viewer", filename),
-            ));
-        }
+        // Draw custom title bar.
+        self.draw_title_bar(ctx);
+
+        // Draw the title bar right-click menu (if open).
+        self.draw_titlebar_menu(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(30, 30, 30)))
@@ -519,7 +874,6 @@ impl eframe::App for ViewerApp {
                         let uvs = self.transform.rotated_uvs();
                         let mut mesh = egui::Mesh::with_texture(texture.id());
                         let tint = egui::Color32::WHITE;
-                        // Vertices: top-left, top-right, bottom-right, bottom-left
                         mesh.vertices.push(egui::epaint::Vertex {
                             pos: image_rect.left_top(),
                             uv: uvs[0],
@@ -540,7 +894,6 @@ impl eframe::App for ViewerApp {
                             uv: uvs[3],
                             color: tint,
                         });
-                        // Two triangles: 0-1-2 and 0-2-3
                         mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
                         painter.add(egui::Shape::mesh(mesh));
 
@@ -553,125 +906,5 @@ impl eframe::App for ViewerApp {
                     });
                 }
             });
-
-        // Property overlay (top-left).
-        if self.show_properties {
-            egui::Area::new(egui::Id::new("properties_overlay"))
-                .fixed_pos(egui::pos2(10.0, 10.0))
-                .order(egui::Order::Foreground)
-                .interactable(false)
-                .show(ctx, |ui| {
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_black_alpha(180))
-                        .corner_radius(4.0)
-                        .inner_margin(egui::Margin::same(8))
-                        .show(ui, |ui| {
-                            ui.style_mut().visuals.override_text_color =
-                                Some(egui::Color32::from_gray(220));
-
-                            if let Some(fl) = &self.file_list {
-                                if let Some(path) = fl.current_path() {
-                                    // Filename.
-                                    let filename = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    ui.label(format!("File: {}", filename));
-
-                                    // File size.
-                                    if let Ok(meta) = std::fs::metadata(path) {
-                                        let size_bytes = meta.len();
-                                        let size_str = if size_bytes >= 1_048_576 {
-                                            format!("{:.1} MB", size_bytes as f64 / 1_048_576.0)
-                                        } else if size_bytes >= 1024 {
-                                            format!("{:.1} KB", size_bytes as f64 / 1024.0)
-                                        } else {
-                                            format!("{} B", size_bytes)
-                                        };
-                                        ui.label(format!("Size: {}", size_str));
-                                    }
-
-                                    // Image dimensions.
-                                    if let Some(img_size) = self.image_size {
-                                        ui.label(format!(
-                                            "Dimensions: {} x {}",
-                                            img_size[0], img_size[1]
-                                        ));
-                                    }
-
-                                    // Position in list.
-                                    ui.label(format!(
-                                        "Position: {} / {}",
-                                        fl.current_index() + 1,
-                                        fl.file_count()
-                                    ));
-
-                                    // Rotation.
-                                    if self.transform.rotation != 0 {
-                                        ui.label(format!(
-                                            "Rotation: {}°",
-                                            self.transform.rotation
-                                        ));
-                                    }
-
-                                    // Slideshow status.
-                                    if self.slideshow_active {
-                                        ui.label(format!(
-                                            "Slideshow: {:.0}s interval",
-                                            self.slideshow_interval
-                                        ));
-                                    }
-                                }
-                            }
-                        });
-                });
-        }
-
-        // Context menu (rendered as a floating area).
-        if self.show_context_menu {
-            let menu_pos = self.context_menu_pos;
-            let area_resp = egui::Area::new(egui::Id::new("context_menu"))
-                .fixed_pos(menu_pos)
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(180.0);
-
-                        if ui.button("Rotate Clockwise (R)").clicked() {
-                            self.transform.rotate_cw();
-                            self.show_context_menu = false;
-                        }
-                        if ui.button("Rotate Counter-clockwise (Shift+R)").clicked() {
-                            self.transform.rotate_ccw();
-                            self.show_context_menu = false;
-                        }
-                        ui.separator();
-                        let slideshow_label = if self.slideshow_active {
-                            "Stop Slideshow (S)"
-                        } else {
-                            "Start Slideshow (S)"
-                        };
-                        if ui.button(slideshow_label).clicked() {
-                            self.slideshow_active = !self.slideshow_active;
-                            if self.slideshow_active {
-                                self.slideshow_last_advance = ctx.input(|i| i.time);
-                            }
-                            self.show_context_menu = false;
-                        }
-                        ui.separator();
-                        if ui.button("Reset View").clicked() {
-                            self.transform.reset();
-                            self.show_context_menu = false;
-                        }
-                    });
-                });
-
-            // Close menu if clicking outside it.
-            let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
-                && !area_resp.response.hovered();
-            if clicked_elsewhere {
-                self.show_context_menu = false;
-            }
-        }
     }
 }

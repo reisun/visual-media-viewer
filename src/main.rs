@@ -28,7 +28,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
             .with_title(&title)
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_decorations(false),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
