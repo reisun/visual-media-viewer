@@ -2,6 +2,7 @@ use eframe::egui;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::cache::ImageCache;
 use crate::file_list::{FileList, GroupBy, SortKey, SortOrder};
@@ -29,34 +30,187 @@ impl DecodedImage {
     }
 }
 
-fn downscale_for_display(src: &egui::ColorImage, available: egui::Vec2) -> egui::ColorImage {
-    let [w, h] = src.size;
-    let max_w = (available.x * 2.0) as u32;
-    let max_h = (available.y * 2.0) as u32;
-    if w as u32 <= max_w && h as u32 <= max_h {
-        return src.clone();
-    }
-    let scale_x = max_w as f32 / w as f32;
-    let scale_y = max_h as f32 / h as f32;
-    let scale = scale_x.min(scale_y);
-    let new_w = ((w as f32 * scale) as u32).max(1);
-    let new_h = ((h as f32 * scale) as u32).max(1);
+fn compute_mip_levels(width: u32, height: u32) -> u32 {
+    (width.max(height) as f32).log2().floor() as u32 + 1
+}
 
-    let rgba = image::RgbaImage::from_raw(w as u32, h as u32, {
-        let mut buf = Vec::with_capacity(w * h * 4);
-        for pixel in &src.pixels {
-            buf.push(pixel.r());
-            buf.push(pixel.g());
-            buf.push(pixel.b());
-            buf.push(pixel.a());
+fn box_filter_mip(data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let new_w = (width / 2).max(1);
+    let new_h = (height / 2).max(1);
+    let w = width as usize;
+    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
+    for y in 0..new_h as usize {
+        for x in 0..new_w as usize {
+            let sx = x * 2;
+            let sy = y * 2;
+            let mut r = 0u32;
+            let mut g = 0u32;
+            let mut b = 0u32;
+            let mut a = 0u32;
+            for dy in 0..2usize {
+                for dx in 0..2usize {
+                    let px = (sx + dx).min(width as usize - 1);
+                    let py = (sy + dy).min(height as usize - 1);
+                    let idx = (py * w + px) * 4;
+                    r += data[idx] as u32;
+                    g += data[idx + 1] as u32;
+                    b += data[idx + 2] as u32;
+                    a += data[idx + 3] as u32;
+                }
+            }
+            let oi = (y * new_w as usize + x) * 4;
+            out[oi] = (r / 4) as u8;
+            out[oi + 1] = (g / 4) as u8;
+            out[oi + 2] = (b / 4) as u8;
+            out[oi + 3] = (a / 4) as u8;
         }
-        buf
-    })
-    .expect("pixel buffer size mismatch");
+    }
+    (out, new_w, new_h)
+}
 
-    let resized = image::imageops::resize(&rgba, new_w, new_h, image::imageops::FilterType::Lanczos3);
-    let size = [resized.width() as usize, resized.height() as usize];
-    egui::ColorImage::from_rgba_unmultiplied(size, resized.as_raw())
+fn color_image_to_rgba(img: &egui::ColorImage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(img.pixels.len() * 4);
+    for pixel in &img.pixels {
+        buf.push(pixel.r());
+        buf.push(pixel.g());
+        buf.push(pixel.b());
+        buf.push(pixel.a());
+    }
+    buf
+}
+
+fn nearest_half_from_pixels(src: &[egui::Color32], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let new_w = width / 2;
+    let new_h = height / 2;
+    let stride = width as usize;
+    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
+    for y in 0..new_h as usize {
+        let row = y * 2 * stride;
+        for x in 0..new_w as usize {
+            let p = src[row + x * 2];
+            out.push(p.r());
+            out.push(p.g());
+            out.push(p.b());
+            out.push(p.a());
+        }
+    }
+    (out, new_w, new_h)
+}
+
+fn nearest_half_rgba(src: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let new_w = width / 2;
+    let new_h = height / 2;
+    let stride = width as usize * 4;
+    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
+    for y in 0..new_h as usize {
+        let row = y * 2 * stride;
+        for x in 0..new_w as usize {
+            let idx = row + x * 2 * 4;
+            out.push(src[idx]);
+            out.push(src[idx + 1]);
+            out.push(src[idx + 2]);
+            out.push(src[idx + 3]);
+        }
+    }
+    (out, new_w, new_h)
+}
+
+fn create_mipmapped_texture(
+    render_state: &eframe::egui_wgpu::RenderState,
+    pixels: &egui::ColorImage,
+) -> (egui::TextureId, wgpu::Texture, [usize; 2]) {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let max_dim = device.limits().max_texture_dimension_2d;
+
+    let orig_w = pixels.size[0] as u32;
+    let orig_h = pixels.size[1] as u32;
+
+    let (mut data, mut w, mut h) = if orig_w > max_dim || orig_h > max_dim {
+        let (d, nw, nh) = nearest_half_from_pixels(&pixels.pixels, orig_w, orig_h);
+        (d, nw, nh)
+    } else {
+        (color_image_to_rgba(pixels), orig_w, orig_h)
+    };
+
+    while w > max_dim || h > max_dim {
+        let (shrunk, nw, nh) = nearest_half_rgba(&data, w, h);
+        data = shrunk;
+        w = nw;
+        h = nh;
+    }
+
+    let actual_size = [w as usize, h as usize];
+    let mip_levels = compute_mip_levels(w, h);
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mipmapped_image"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: mip_levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let mut current_data = data;
+    let mut current_w = w;
+    let mut current_h = h;
+    for level in 1..mip_levels {
+        let (mip_data, mip_w, mip_h) = box_filter_mip(&current_data, current_w, current_h);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mip_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(mip_w * 4),
+                rows_per_image: Some(mip_h),
+            },
+            wgpu::Extent3d {
+                width: mip_w,
+                height: mip_h,
+                depth_or_array_layers: 1,
+            },
+        );
+        current_data = mip_data;
+        current_w = mip_w;
+        current_h = mip_h;
+    }
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut renderer = render_state.renderer.write();
+    let tex_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
+    (tex_id, texture, actual_size)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,38 +311,29 @@ impl ViewTransform {
 
 /// Main application state.
 pub struct ViewerApp {
-    /// Currently displayed texture handle.
-    texture: Option<egui::TextureHandle>,
-    /// Size of the currently loaded image in pixels.
+    texture_id: Option<egui::TextureId>,
+    wgpu_texture: Option<wgpu::Texture>,
     image_size: Option<[usize; 2]>,
-    /// File list for navigation.
     file_list: Option<FileList>,
-    /// Image cache for preloading.
     cache: ImageCache,
-    /// Zoom and pan transform.
     transform: ViewTransform,
-    /// Error message to display if image loading fails.
     error_message: Option<String>,
-    /// Slideshow active state.
     slideshow_active: bool,
-    /// Slideshow interval in seconds.
     slideshow_interval: f64,
-    /// Timestamp of the last slideshow advance.
     slideshow_last_advance: f64,
-    /// Fit display mode.
     fit_mode: FitMode,
-    /// Whether the title bar right-click menu is open.
     show_titlebar_menu: bool,
-    /// Position where the title bar menu should appear.
     titlebar_menu_pos: egui::Pos2,
-    /// Whether the window is currently maximized (tracked for toggle).
     is_maximized: bool,
-    /// Persisted settings.
     settings: Settings,
+    render_state: Arc<eframe::egui_wgpu::RenderState>,
 }
 
 impl ViewerApp {
-    pub fn new(initial_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        initial_path: Option<PathBuf>,
+        render_state: Arc<eframe::egui_wgpu::RenderState>,
+    ) -> Self {
         let settings = Settings::load();
         let mut transform = ViewTransform::default();
         transform.rotation = settings.rotation;
@@ -198,7 +343,8 @@ impl ViewerApp {
         };
 
         let mut app = Self {
-            texture: None,
+            texture_id: None,
+            wgpu_texture: None,
             image_size: None,
             file_list: None,
             cache: ImageCache::new(10),
@@ -212,6 +358,7 @@ impl ViewerApp {
             titlebar_menu_pos: egui::Pos2::ZERO,
             is_maximized: false,
             settings,
+            render_state,
         };
 
         if let Some(path) = initial_path {
@@ -219,6 +366,14 @@ impl ViewerApp {
         }
 
         app
+    }
+
+    fn free_current_texture(&mut self) {
+        if let Some(id) = self.texture_id.take() {
+            let mut renderer = self.render_state.renderer.write();
+            renderer.free_texture(&id);
+        }
+        self.wgpu_texture = None;
     }
 
     /// Open a file and build the file list from its directory.
@@ -234,7 +389,8 @@ impl ViewerApp {
         if let Some(parent) = canonical.parent() {
             let mut file_list = FileList::from_directory(parent);
             file_list.set_group_by(self.saved_group_by());
-            file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
+            file_list.re_sort_dirs(self.saved_sort_key(), self.saved_sort_order());
+            file_list.re_sort_files(self.saved_file_sort_key(), self.saved_file_sort_order());
             file_list.set_current(&canonical);
             self.file_list = Some(file_list);
         }
@@ -245,7 +401,8 @@ impl ViewerApp {
     fn open_directory(&mut self, dir: &Path) {
         let mut file_list = FileList::from_directory(dir);
         file_list.set_group_by(self.saved_group_by());
-        file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
+        file_list.re_sort_dirs(self.saved_sort_key(), self.saved_sort_order());
+        file_list.re_sort_files(self.saved_file_sort_key(), self.saved_file_sort_order());
         if file_list.file_count() > 0 {
             self.cache.clear();
             self.file_list = Some(file_list);
@@ -286,6 +443,14 @@ impl ViewerApp {
                 GroupBy::Off => GroupBySetting::Off,
                 GroupBy::ModifiedDate => GroupBySetting::ModifiedDate,
             };
+            self.settings.file_sort_key = match fl.file_sort_key {
+                SortKey::Name => SortKeySetting::Name,
+                SortKey::ModifiedDate => SortKeySetting::ModifiedDate,
+            };
+            self.settings.file_sort_order = match fl.file_sort_order {
+                SortOrder::Ascending => SortOrderSetting::Ascending,
+                SortOrder::Descending => SortOrderSetting::Descending,
+            };
         }
         self.settings.save();
     }
@@ -297,9 +462,23 @@ impl ViewerApp {
         }
     }
 
+    fn saved_file_sort_key(&self) -> SortKey {
+        match self.settings.file_sort_key {
+            SortKeySetting::Name => SortKey::Name,
+            SortKeySetting::ModifiedDate => SortKey::ModifiedDate,
+        }
+    }
+
+    fn saved_file_sort_order(&self) -> SortOrder {
+        match self.settings.file_sort_order {
+            SortOrderSetting::Ascending => SortOrder::Ascending,
+            SortOrderSetting::Descending => SortOrder::Descending,
+        }
+    }
+
     /// Load the current image from the file list (using cache if available).
     fn load_current_image(&mut self) {
-        self.texture = None;
+        self.free_current_texture();
         self.image_size = None;
         self.error_message = None;
         self.transform.reset_zoom_pan();
@@ -525,15 +704,15 @@ impl ViewerApp {
                 }
 
                 ui.horizontal_centered(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&title_text)
-                                .color(egui::Color32::from_gray(220))
-                                .size(13.0),
-                        ),
+                    let text_rect = ui.available_rect_before_wrap();
+                    ui.painter().text(
+                        egui::pos2(text_rect.left(), text_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &title_text,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_gray(220),
                     );
 
-                    // Right-align the window control buttons.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn_size = egui::vec2(36.0, 24.0);
 
@@ -584,14 +763,18 @@ impl ViewerApp {
     }
 
     fn draw_titlebar_menu(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_titlebar_menu;
-        if !open {
+        if !self.show_titlebar_menu {
+            return;
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_titlebar_menu = false;
             return;
         }
 
         let menu_pos = self.titlebar_menu_pos;
-        egui::Window::new("メニュー")
-            .open(&mut open)
+        let menu_response = egui::Window::new("titlebar_context_menu")
+            .title_bar(false)
             .fixed_pos(menu_pos)
             .collapsible(false)
             .resizable(false)
@@ -616,7 +799,7 @@ impl ViewerApp {
 
                 ui.separator();
 
-                ui.label(egui::RichText::new("並び順（対象）").size(12.0));
+                ui.label(egui::RichText::new("フォルダ並び順").size(12.0));
                 {
                     let mut key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
                     let prev = key;
@@ -625,13 +808,11 @@ impl ViewerApp {
                     if key != prev {
                         if let Some(fl) = &mut self.file_list {
                             let order = fl.sort_order;
-                            fl.re_sort(key, order);
+                            fl.re_sort_dirs(key, order);
                         }
                         self.save_settings();
                     }
                 }
-
-                ui.label(egui::RichText::new("並び順（順序）").size(12.0));
                 {
                     let mut order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
                     let prev = order;
@@ -640,7 +821,7 @@ impl ViewerApp {
                     if order != prev {
                         if let Some(fl) = &mut self.file_list {
                             let key = fl.sort_key;
-                            fl.re_sort(key, order);
+                            fl.re_sort_dirs(key, order);
                         }
                         self.save_settings();
                     }
@@ -657,6 +838,36 @@ impl ViewerApp {
                     if group != prev {
                         if let Some(fl) = &mut self.file_list {
                             fl.set_group_by(group);
+                        }
+                        self.save_settings();
+                    }
+                }
+
+                ui.separator();
+
+                ui.label(egui::RichText::new("ファイル並び順").size(12.0));
+                {
+                    let mut key = self.file_list.as_ref().map(|fl| fl.file_sort_key).unwrap_or(SortKey::Name);
+                    let prev = key;
+                    ui.radio_value(&mut key, SortKey::Name, "名前");
+                    ui.radio_value(&mut key, SortKey::ModifiedDate, "更新日時");
+                    if key != prev {
+                        if let Some(fl) = &mut self.file_list {
+                            let order = fl.file_sort_order;
+                            fl.re_sort_files(key, order);
+                        }
+                        self.save_settings();
+                    }
+                }
+                {
+                    let mut order = self.file_list.as_ref().map(|fl| fl.file_sort_order).unwrap_or(SortOrder::Ascending);
+                    let prev = order;
+                    ui.radio_value(&mut order, SortOrder::Ascending, "昇順");
+                    ui.radio_value(&mut order, SortOrder::Descending, "降順");
+                    if order != prev {
+                        if let Some(fl) = &mut self.file_list {
+                            let key = fl.file_sort_key;
+                            fl.re_sort_files(key, order);
                         }
                         self.save_settings();
                     }
@@ -736,7 +947,75 @@ impl ViewerApp {
                 }
             });
 
-        self.show_titlebar_menu = open;
+        if let Some(inner) = menu_response {
+            if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+                if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                    if !inner.response.rect.contains(pos) {
+                        self.show_titlebar_menu = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl ViewerApp {
+    fn handle_window_resize(&self, ctx: &egui::Context) {
+        if self.is_maximized {
+            return;
+        }
+        const EDGE: f32 = 6.0;
+        let rect = ctx.screen_rect();
+        let pos = match ctx.input(|i| i.pointer.latest_pos()) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let left = pos.x - rect.left() < EDGE;
+        let right = rect.right() - pos.x < EDGE;
+        let top = pos.y - rect.top() < EDGE;
+        let bottom = rect.bottom() - pos.y < EDGE;
+
+        let (direction, cursor) = match (left, right, top, bottom) {
+            (true, _, true, _) => (
+                egui::ResizeDirection::NorthWest,
+                egui::CursorIcon::ResizeNwSe,
+            ),
+            (_, true, true, _) => (
+                egui::ResizeDirection::NorthEast,
+                egui::CursorIcon::ResizeNeSw,
+            ),
+            (true, _, _, true) => (
+                egui::ResizeDirection::SouthWest,
+                egui::CursorIcon::ResizeNeSw,
+            ),
+            (_, true, _, true) => (
+                egui::ResizeDirection::SouthEast,
+                egui::CursorIcon::ResizeNwSe,
+            ),
+            (true, _, _, _) => (
+                egui::ResizeDirection::West,
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (_, true, _, _) => (
+                egui::ResizeDirection::East,
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (_, _, true, _) => (
+                egui::ResizeDirection::North,
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (_, _, _, true) => (
+                egui::ResizeDirection::South,
+                egui::CursorIcon::ResizeVertical,
+            ),
+            _ => return,
+        };
+
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
     }
 }
 
@@ -744,6 +1023,9 @@ impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll cache for completed preloads.
         self.cache.poll();
+
+        // Handle window edge resize.
+        self.handle_window_resize(ctx);
 
         // Handle file drop.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -862,23 +1144,19 @@ impl eframe::App for ViewerApp {
                     .map(|p| p.to_path_buf());
 
                 if let Some(path) = current_path {
-                    if self.texture.is_none() {
+                    if self.texture_id.is_none() {
                         if let Some(pixels) = self.cache.get(&path) {
-                            self.image_size = Some(pixels.size);
-                            let display_pixels = downscale_for_display(pixels, available);
-                            let texture = ctx.load_texture(
-                                "current_image",
-                                display_pixels,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            self.texture = Some(texture);
+                            let (id, tex, actual_size) =
+                                create_mipmapped_texture(&self.render_state, pixels);
+                            self.image_size = Some(actual_size);
+                            self.texture_id = Some(id);
+                            self.wgpu_texture = Some(tex);
                         }
                     }
 
-                    if let (Some(texture), Some(img_size)) = (&self.texture, &self.image_size) {
+                    if let (Some(tex_id), Some(img_size)) = (self.texture_id, &self.image_size) {
                         let fit = self.fit_scale(available);
 
-                        // For 90/270, swap displayed dimensions.
                         let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
                             (
                                 img_size[1] as f32 * fit * self.transform.zoom,
@@ -899,13 +1177,11 @@ impl eframe::App for ViewerApp {
                             egui::vec2(display_w, display_h),
                         );
 
-                        // Allocate the full area for interaction.
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
-                        // Draw the image using a mesh with rotated UV coordinates.
                         let uvs = self.transform.rotated_uvs();
-                        let mut mesh = egui::Mesh::with_texture(texture.id());
+                        let mut mesh = egui::Mesh::with_texture(tex_id);
                         let tint = egui::Color32::WHITE;
                         mesh.vertices.push(egui::epaint::Vertex {
                             pos: image_rect.left_top(),
@@ -930,7 +1206,6 @@ impl eframe::App for ViewerApp {
                         mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
                         painter.add(egui::Shape::mesh(mesh));
 
-                        // Handle zoom interactions.
                         self.handle_zoom_input(&response, available);
                     }
                 } else if self.file_list.is_none() {

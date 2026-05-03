@@ -33,6 +33,10 @@ pub struct Settings {
     pub sort_order: SortOrderSetting,
     #[serde(default)]
     pub group_by: GroupBySetting,
+    #[serde(default)]
+    pub file_sort_key: SortKeySetting,
+    #[serde(default)]
+    pub file_sort_order: SortOrderSetting,
 }
 
 impl Default for Settings {
@@ -43,7 +47,21 @@ impl Default for Settings {
             sort_key: SortKeySetting::Name,
             sort_order: SortOrderSetting::Ascending,
             group_by: GroupBySetting::Off,
+            file_sort_key: SortKeySetting::Name,
+            file_sort_order: SortOrderSetting::Ascending,
         }
+    }
+}
+
+impl Default for SortKeySetting {
+    fn default() -> Self {
+        Self::Name
+    }
+}
+
+impl Default for SortOrderSetting {
+    fn default() -> Self {
+        Self::Ascending
     }
 }
 

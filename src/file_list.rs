@@ -3,6 +3,36 @@ use std::time::SystemTime;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
 
+#[cfg(target_os = "windows")]
+mod win_sort {
+    use std::cmp::Ordering;
+
+    #[link(name = "shlwapi")]
+    extern "system" {
+        fn StrCmpLogicalW(psz1: *const u16, psz2: *const u16) -> i32;
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn compare_logical(a: &str, b: &str) -> Ordering {
+        let wa = to_wide(a);
+        let wb = to_wide(b);
+        let result = unsafe { StrCmpLogicalW(wa.as_ptr(), wb.as_ptr()) };
+        result.cmp(&0)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod win_sort {
+    use std::cmp::Ordering;
+
+    pub fn compare_logical(a: &str, b: &str) -> Ordering {
+        natord::compare_ignore_case(a, b)
+    }
+}
+
 /// Returns true if the path has a supported image extension (case-insensitive).
 fn is_supported_image(path: &Path) -> bool {
     path.extension()
@@ -91,6 +121,8 @@ pub struct FileList {
     pub sort_key: SortKey,
     pub sort_order: SortOrder,
     pub group_by: GroupBy,
+    pub file_sort_key: SortKey,
+    pub file_sort_order: SortOrder,
 }
 
 impl FileList {
@@ -102,6 +134,8 @@ impl FileList {
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
             group_by: GroupBy::Off,
+            file_sort_key: SortKey::Name,
+            file_sort_order: SortOrder::Ascending,
         };
         fl.scan_and_sort();
         fl
@@ -120,32 +154,15 @@ impl FileList {
             }
         };
 
-        let sort_key = self.sort_key;
-        let sort_order = self.sort_order;
-        let group_by = self.group_by;
+        let sort_key = self.file_sort_key;
+        let sort_order = self.file_sort_order;
 
         files.sort_by(|a, b| {
-            // Group first if enabled.
-            if group_by == GroupBy::ModifiedDate {
-                let a_time = file_modified_time(a);
-                let b_time = file_modified_time(b);
-                let a_group = classify_date_group(a_time);
-                let b_group = classify_date_group(b_time);
-                let group_cmp = match sort_order {
-                    SortOrder::Ascending => a_group.cmp(&b_group),
-                    SortOrder::Descending => b_group.cmp(&a_group),
-                };
-                if group_cmp != std::cmp::Ordering::Equal {
-                    return group_cmp;
-                }
-            }
-
-            // Then sort within group.
             let cmp = match sort_key {
                 SortKey::Name => {
                     let a_name = a.file_name().unwrap_or_default().to_string_lossy();
                     let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-                    natord::compare_ignore_case(&a_name, &b_name)
+                    win_sort::compare_logical(&a_name, &b_name)
                 }
                 SortKey::ModifiedDate => {
                     let a_time = file_modified_time(a);
@@ -162,10 +179,15 @@ impl FileList {
         self.files = files;
     }
 
-    pub fn re_sort(&mut self, key: SortKey, order: SortOrder) {
-        let current_file = self.current_path().map(|p| p.to_path_buf());
+    pub fn re_sort_dirs(&mut self, key: SortKey, order: SortOrder) {
         self.sort_key = key;
         self.sort_order = order;
+    }
+
+    pub fn re_sort_files(&mut self, key: SortKey, order: SortOrder) {
+        let current_file = self.current_path().map(|p| p.to_path_buf());
+        self.file_sort_key = key;
+        self.file_sort_order = order;
         self.scan_and_sort();
         if let Some(path) = current_file {
             self.set_current(&path);
@@ -173,12 +195,7 @@ impl FileList {
     }
 
     pub fn set_group_by(&mut self, group: GroupBy) {
-        let current_file = self.current_path().map(|p| p.to_path_buf());
         self.group_by = group;
-        self.scan_and_sort();
-        if let Some(path) = current_file {
-            self.set_current(&path);
-        }
     }
 
     /// Set the current index to the file matching the given path.
@@ -298,7 +315,7 @@ fn sorted_child_dirs(dir: &Path, opts: &DirSortOpts) -> Vec<PathBuf> {
             SortKey::Name => {
                 let a_name = a.file_name().unwrap_or_default().to_string_lossy();
                 let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-                natord::compare_ignore_case(&a_name, &b_name)
+                win_sort::compare_logical(&a_name, &b_name)
             }
             SortKey::ModifiedDate => {
                 file_modified_time(a).cmp(&file_modified_time(b))
@@ -353,8 +370,11 @@ fn next_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
         return Some(child);
     }
     let mut dir = current.to_path_buf();
-    loop {
+    for _ in 0..MAX_DEPTH {
         let parent = dir.parent()?;
+        if parent == dir {
+            return None;
+        }
         let siblings = sorted_child_dirs(parent, opts);
         if let Some(idx) = siblings.iter().position(|d| d == &dir) {
             for sibling in &siblings[idx + 1..] {
@@ -368,12 +388,16 @@ fn next_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
         }
         dir = parent.to_path_buf();
     }
+    None
 }
 
 fn prev_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     let mut dir = current.to_path_buf();
-    loop {
+    for _ in 0..MAX_DEPTH {
         let parent = dir.parent()?;
+        if parent == dir {
+            return None;
+        }
         let siblings = sorted_child_dirs(parent, opts);
         if let Some(idx) = siblings.iter().position(|d| d == &dir) {
             for sibling in siblings[..idx].iter().rev() {
@@ -387,6 +411,7 @@ fn prev_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
         }
         dir = parent.to_path_buf();
     }
+    None
 }
 
 #[cfg(test)]
