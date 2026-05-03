@@ -28,11 +28,13 @@ impl DecodedImage {
     }
 }
 
-/// Zoom and pan state for the viewer.
+/// Zoom, pan, and rotation state for the viewer.
 struct ViewTransform {
     zoom: f32,
     /// Offset in image pixels from center.
     pan: egui::Vec2,
+    /// Display rotation in degrees (0, 90, 180, 270).
+    rotation: u16,
     /// Whether the user is currently dragging with right-click.
     right_drag_active: bool,
     /// The screen position where right-click drag started.
@@ -46,6 +48,7 @@ impl Default for ViewTransform {
         Self {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            rotation: 0,
             right_drag_active: false,
             right_drag_start_y: 0.0,
             right_drag_start_zoom: 1.0,
@@ -57,7 +60,58 @@ impl ViewTransform {
     fn reset(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
+        self.rotation = 0;
         self.right_drag_active = false;
+    }
+
+    fn rotate_cw(&mut self) {
+        self.rotation = (self.rotation + 90) % 360;
+    }
+
+    fn rotate_ccw(&mut self) {
+        self.rotation = (self.rotation + 270) % 360;
+    }
+
+    /// Get UV coordinates for the four corners based on rotation.
+    /// Returns (top-left, top-right, bottom-right, bottom-left) UV positions.
+    fn rotated_uvs(&self) -> [egui::Pos2; 4] {
+        match self.rotation {
+            0 => [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ],
+            90 => [
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+            ],
+            180 => [
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+            ],
+            270 => [
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+            ],
+            _ => [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ],
+        }
+    }
+
+    /// Returns true if the rotation swaps width and height.
+    fn is_rotated_90_or_270(&self) -> bool {
+        self.rotation == 90 || self.rotation == 270
     }
 }
 
@@ -75,6 +129,18 @@ pub struct ViewerApp {
     transform: ViewTransform,
     /// Error message to display if image loading fails.
     error_message: Option<String>,
+    /// Slideshow active state.
+    slideshow_active: bool,
+    /// Slideshow interval in seconds.
+    slideshow_interval: f64,
+    /// Timestamp of the last slideshow advance.
+    slideshow_last_advance: f64,
+    /// Whether to show the property overlay.
+    show_properties: bool,
+    /// Right-click context menu state.
+    right_press_pos: Option<egui::Pos2>,
+    show_context_menu: bool,
+    context_menu_pos: egui::Pos2,
 }
 
 impl ViewerApp {
@@ -86,6 +152,13 @@ impl ViewerApp {
             cache: ImageCache::new(10),
             transform: ViewTransform::default(),
             error_message: None,
+            slideshow_active: false,
+            slideshow_interval: 3.0,
+            slideshow_last_advance: 0.0,
+            show_properties: false,
+            right_press_pos: None,
+            show_context_menu: false,
+            context_menu_pos: egui::Pos2::ZERO,
         };
 
         if let Some(path) = initial_path {
@@ -192,10 +265,14 @@ impl ViewerApp {
     }
 
     /// Compute the fit-to-window scale for the current image given available size.
+    /// Takes rotation into account (90/270 swaps dimensions).
     fn fit_scale(&self, available: egui::Vec2) -> f32 {
         if let Some(size) = self.image_size {
-            let img_w = size[0] as f32;
-            let img_h = size[1] as f32;
+            let (img_w, img_h) = if self.transform.is_rotated_90_or_270() {
+                (size[1] as f32, size[0] as f32)
+            } else {
+                (size[0] as f32, size[1] as f32)
+            };
             if img_w > 0.0 && img_h > 0.0 {
                 let scale_x = available.x / img_w;
                 let scale_y = available.y / img_h;
@@ -208,10 +285,17 @@ impl ViewerApp {
         }
     }
 
-    /// Handle zoom interactions (right-click drag, scroll wheel, double-click).
+    /// Handle zoom interactions (right-click drag, scroll wheel, double-click)
+    /// and detect right-click short press for context menu.
     fn handle_zoom_input(&mut self, response: &egui::Response, available_size: egui::Vec2) {
         let pointer_pos = response.hover_pos().unwrap_or(response.rect.center());
         let rect_center = response.rect.center();
+
+        // Track right-click press position for context menu detection.
+        let secondary_pressed = response.ctx.input(|i| i.pointer.secondary_pressed());
+        if secondary_pressed {
+            self.right_press_pos = Some(pointer_pos);
+        }
 
         // Right-click drag: zoom by vertical movement.
         if response.secondary_clicked() {
@@ -235,6 +319,14 @@ impl ViewerApp {
                 self.transform.pan = self.transform.pan * zoom_ratio
                     + pointer_offset * (1.0 - zoom_ratio);
             } else {
+                // Right button released: check if it was a short press (no drag).
+                if let Some(press_pos) = self.right_press_pos.take() {
+                    let dist = (pointer_pos - press_pos).length();
+                    if dist < 3.0 {
+                        self.show_context_menu = true;
+                        self.context_menu_pos = pointer_pos;
+                    }
+                }
                 self.transform.right_drag_active = false;
             }
         }
@@ -278,23 +370,82 @@ impl eframe::App for ViewerApp {
             self.open_file(&path);
         }
 
-        // Handle keyboard navigation.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::ArrowRight) {
-                return Some(true);
+        // Handle keyboard input.
+        {
+            let nav = ctx.input(|i| {
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    return Some(true);
+                }
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    return Some(false);
+                }
+                None
+            });
+            if let Some(forward) = nav {
+                if forward {
+                    self.next_image();
+                } else {
+                    self.prev_image();
+                }
             }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                return Some(false);
+
+            // Rotation: R = clockwise, Shift+R = counter-clockwise.
+            let rotate = ctx.input(|i| {
+                if i.key_pressed(egui::Key::R) {
+                    if i.modifiers.shift {
+                        return Some(false); // CCW
+                    }
+                    return Some(true); // CW
+                }
+                None
+            });
+            if let Some(cw) = rotate {
+                if cw {
+                    self.transform.rotate_cw();
+                } else {
+                    self.transform.rotate_ccw();
+                }
             }
-            None
-        })
-        .map(|forward| {
-            if forward {
+
+            // Slideshow: S = toggle, +/= = increase interval, - = decrease interval.
+            let slideshow_toggle = ctx.input(|i| i.key_pressed(egui::Key::S));
+            if slideshow_toggle {
+                self.slideshow_active = !self.slideshow_active;
+                if self.slideshow_active {
+                    self.slideshow_last_advance = ctx.input(|i| i.time);
+                }
+            }
+
+            let interval_change = ctx.input(|i| {
+                if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                    return Some(1.0_f64);
+                }
+                if i.key_pressed(egui::Key::Minus) {
+                    return Some(-1.0_f64);
+                }
+                None
+            });
+            if let Some(delta) = interval_change {
+                self.slideshow_interval = (self.slideshow_interval + delta).clamp(1.0, 30.0);
+            }
+
+            // Property overlay: I = toggle.
+            let toggle_props = ctx.input(|i| i.key_pressed(egui::Key::I));
+            if toggle_props {
+                self.show_properties = !self.show_properties;
+            }
+        }
+
+        // Slideshow timer.
+        if self.slideshow_active {
+            let now = ctx.input(|i| i.time);
+            if now - self.slideshow_last_advance >= self.slideshow_interval {
+                self.slideshow_last_advance = now;
                 self.next_image();
-            } else {
-                self.prev_image();
             }
-        });
+            let remaining = self.slideshow_interval - (ctx.input(|i| i.time) - self.slideshow_last_advance);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.01)));
+        }
 
         // Update window title.
         if let Some(filename) = self.current_filename() {
@@ -338,8 +489,19 @@ impl eframe::App for ViewerApp {
 
                     if let (Some(texture), Some(img_size)) = (&self.texture, &self.image_size) {
                         let fit = self.fit_scale(available);
-                        let display_w = img_size[0] as f32 * fit * self.transform.zoom;
-                        let display_h = img_size[1] as f32 * fit * self.transform.zoom;
+
+                        // For 90/270, swap displayed dimensions.
+                        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
+                            (
+                                img_size[1] as f32 * fit * self.transform.zoom,
+                                img_size[0] as f32 * fit * self.transform.zoom,
+                            )
+                        } else {
+                            (
+                                img_size[0] as f32 * fit * self.transform.zoom,
+                                img_size[1] as f32 * fit * self.transform.zoom,
+                            )
+                        };
 
                         let center = ui.available_rect_before_wrap().center();
                         let offset = self.transform.pan;
@@ -353,16 +515,34 @@ impl eframe::App for ViewerApp {
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
-                        // Draw the image.
-                        painter.image(
-                            texture.id(),
-                            image_rect,
-                            egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            ),
-                            egui::Color32::WHITE,
-                        );
+                        // Draw the image using a mesh with rotated UV coordinates.
+                        let uvs = self.transform.rotated_uvs();
+                        let mut mesh = egui::Mesh::with_texture(texture.id());
+                        let tint = egui::Color32::WHITE;
+                        // Vertices: top-left, top-right, bottom-right, bottom-left
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.left_top(),
+                            uv: uvs[0],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.right_top(),
+                            uv: uvs[1],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.right_bottom(),
+                            uv: uvs[2],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.left_bottom(),
+                            uv: uvs[3],
+                            color: tint,
+                        });
+                        // Two triangles: 0-1-2 and 0-2-3
+                        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+                        painter.add(egui::Shape::mesh(mesh));
 
                         // Handle zoom interactions.
                         self.handle_zoom_input(&response, available);
@@ -373,5 +553,125 @@ impl eframe::App for ViewerApp {
                     });
                 }
             });
+
+        // Property overlay (top-left).
+        if self.show_properties {
+            egui::Area::new(egui::Id::new("properties_overlay"))
+                .fixed_pos(egui::pos2(10.0, 10.0))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(180))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.style_mut().visuals.override_text_color =
+                                Some(egui::Color32::from_gray(220));
+
+                            if let Some(fl) = &self.file_list {
+                                if let Some(path) = fl.current_path() {
+                                    // Filename.
+                                    let filename = path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    ui.label(format!("File: {}", filename));
+
+                                    // File size.
+                                    if let Ok(meta) = std::fs::metadata(path) {
+                                        let size_bytes = meta.len();
+                                        let size_str = if size_bytes >= 1_048_576 {
+                                            format!("{:.1} MB", size_bytes as f64 / 1_048_576.0)
+                                        } else if size_bytes >= 1024 {
+                                            format!("{:.1} KB", size_bytes as f64 / 1024.0)
+                                        } else {
+                                            format!("{} B", size_bytes)
+                                        };
+                                        ui.label(format!("Size: {}", size_str));
+                                    }
+
+                                    // Image dimensions.
+                                    if let Some(img_size) = self.image_size {
+                                        ui.label(format!(
+                                            "Dimensions: {} x {}",
+                                            img_size[0], img_size[1]
+                                        ));
+                                    }
+
+                                    // Position in list.
+                                    ui.label(format!(
+                                        "Position: {} / {}",
+                                        fl.current_index() + 1,
+                                        fl.file_count()
+                                    ));
+
+                                    // Rotation.
+                                    if self.transform.rotation != 0 {
+                                        ui.label(format!(
+                                            "Rotation: {}°",
+                                            self.transform.rotation
+                                        ));
+                                    }
+
+                                    // Slideshow status.
+                                    if self.slideshow_active {
+                                        ui.label(format!(
+                                            "Slideshow: {:.0}s interval",
+                                            self.slideshow_interval
+                                        ));
+                                    }
+                                }
+                            }
+                        });
+                });
+        }
+
+        // Context menu (rendered as a floating area).
+        if self.show_context_menu {
+            let menu_pos = self.context_menu_pos;
+            let area_resp = egui::Area::new(egui::Id::new("context_menu"))
+                .fixed_pos(menu_pos)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(180.0);
+
+                        if ui.button("Rotate Clockwise (R)").clicked() {
+                            self.transform.rotate_cw();
+                            self.show_context_menu = false;
+                        }
+                        if ui.button("Rotate Counter-clockwise (Shift+R)").clicked() {
+                            self.transform.rotate_ccw();
+                            self.show_context_menu = false;
+                        }
+                        ui.separator();
+                        let slideshow_label = if self.slideshow_active {
+                            "Stop Slideshow (S)"
+                        } else {
+                            "Start Slideshow (S)"
+                        };
+                        if ui.button(slideshow_label).clicked() {
+                            self.slideshow_active = !self.slideshow_active;
+                            if self.slideshow_active {
+                                self.slideshow_last_advance = ctx.input(|i| i.time);
+                            }
+                            self.show_context_menu = false;
+                        }
+                        ui.separator();
+                        if ui.button("Reset View").clicked() {
+                            self.transform.reset();
+                            self.show_context_menu = false;
+                        }
+                    });
+                });
+
+            // Close menu if clicking outside it.
+            let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+                && !area_resp.response.hovered();
+            if clicked_elsewhere {
+                self.show_context_menu = false;
+            }
+        }
     }
 }

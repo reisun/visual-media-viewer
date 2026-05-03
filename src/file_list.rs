@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 /// Supported image file extensions (lowercase).
-const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp"];
+const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
 
 /// Returns true if the path has a supported image extension (case-insensitive).
 fn is_supported_image(path: &Path) -> bool {
@@ -35,11 +35,10 @@ impl FileList {
             }
         };
 
-        // Sort by filename (case-insensitive for consistent ordering).
         files.sort_by(|a, b| {
-            let a_name = a.file_name().unwrap_or_default().to_ascii_lowercase();
-            let b_name = b.file_name().unwrap_or_default().to_ascii_lowercase();
-            a_name.cmp(&b_name)
+            let a_name = a.file_name().unwrap_or_default().to_string_lossy();
+            let b_name = b.file_name().unwrap_or_default().to_string_lossy();
+            natord::compare_ignore_case(&a_name, &b_name)
         });
 
         Self {
@@ -60,24 +59,40 @@ impl FileList {
         self.files.get(self.current_index).map(|p| p.as_path())
     }
 
-    /// Move to the next file. Returns true if the index changed.
+    /// Move to the next file (wraps around to first). Returns true if the index changed.
     pub fn next(&mut self) -> bool {
+        if self.files.len() <= 1 {
+            return false;
+        }
         if self.current_index + 1 < self.files.len() {
             self.current_index += 1;
-            true
         } else {
-            false
+            self.current_index = 0;
         }
+        true
     }
 
-    /// Move to the previous file. Returns true if the index changed.
+    /// Move to the previous file (wraps around to last). Returns true if the index changed.
     pub fn prev(&mut self) -> bool {
+        if self.files.len() <= 1 {
+            return false;
+        }
         if self.current_index > 0 {
             self.current_index -= 1;
-            true
         } else {
-            false
+            self.current_index = self.files.len() - 1;
         }
+        true
+    }
+
+    /// Get the total number of files.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Get the current index (0-based).
+    pub fn current_index(&self) -> usize {
+        self.current_index
     }
 
     /// Get paths of nearby files (within `range` of current index).
@@ -100,8 +115,38 @@ mod tests {
         assert!(is_supported_image(Path::new("photo.Png")));
         assert!(is_supported_image(Path::new("photo.gif")));
         assert!(is_supported_image(Path::new("photo.bmp")));
+        assert!(is_supported_image(Path::new("photo.webp")));
+        assert!(is_supported_image(Path::new("photo.tiff")));
+        assert!(is_supported_image(Path::new("photo.TIF")));
         assert!(!is_supported_image(Path::new("photo.txt")));
-        assert!(!is_supported_image(Path::new("photo.webp")));
         assert!(!is_supported_image(Path::new("noext")));
+    }
+
+    #[test]
+    fn test_natural_sort_basic_numbers() {
+        let mut names = vec!["file10.jpg", "file2.jpg", "file1.jpg", "file20.jpg"];
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
+        assert_eq!(names, vec!["file1.jpg", "file2.jpg", "file10.jpg", "file20.jpg"]);
+    }
+
+    #[test]
+    fn test_natural_sort_parenthesized_numbers() {
+        let mut names = vec![
+            "image(10).jpg",
+            "image(2).jpg",
+            "image(1).jpg",
+        ];
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
+        assert_eq!(
+            names,
+            vec!["image(1).jpg", "image(2).jpg", "image(10).jpg"]
+        );
+    }
+
+    #[test]
+    fn test_natural_sort_multiple_number_groups() {
+        let mut names = vec!["vol2ch10.jpg", "vol2ch2.jpg", "vol1ch10.jpg"];
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
+        assert_eq!(names, vec!["vol1ch10.jpg", "vol2ch2.jpg", "vol2ch10.jpg"]);
     }
 }
