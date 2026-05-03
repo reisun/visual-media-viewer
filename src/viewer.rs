@@ -597,18 +597,14 @@ impl ViewerApp {
 
                     ui.label(egui::RichText::new("並び順（対象）").size(12.0));
                     {
-                        let current_key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
-                        if ui.radio_value(&mut current_key.clone(), SortKey::Name, "名前").changed() {
+                        let mut key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
+                        let prev = key;
+                        ui.radio_value(&mut key, SortKey::Name, "名前");
+                        ui.radio_value(&mut key, SortKey::ModifiedDate, "更新日時");
+                        if key != prev {
                             if let Some(fl) = &mut self.file_list {
                                 let order = fl.sort_order;
-                                fl.re_sort(SortKey::Name, order);
-                            }
-                            self.save_settings();
-                        }
-                        if ui.radio_value(&mut current_key.clone(), SortKey::ModifiedDate, "更新日時").changed() {
-                            if let Some(fl) = &mut self.file_list {
-                                let order = fl.sort_order;
-                                fl.re_sort(SortKey::ModifiedDate, order);
+                                fl.re_sort(key, order);
                             }
                             self.save_settings();
                         }
@@ -616,18 +612,14 @@ impl ViewerApp {
 
                     ui.label(egui::RichText::new("並び順（順序）").size(12.0));
                     {
-                        let current_order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
-                        if ui.radio_value(&mut current_order.clone(), SortOrder::Ascending, "昇順").changed() {
+                        let mut order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
+                        let prev = order;
+                        ui.radio_value(&mut order, SortOrder::Ascending, "昇順");
+                        ui.radio_value(&mut order, SortOrder::Descending, "降順");
+                        if order != prev {
                             if let Some(fl) = &mut self.file_list {
                                 let key = fl.sort_key;
-                                fl.re_sort(key, SortOrder::Ascending);
-                            }
-                            self.save_settings();
-                        }
-                        if ui.radio_value(&mut current_order.clone(), SortOrder::Descending, "降順").changed() {
-                            if let Some(fl) = &mut self.file_list {
-                                let key = fl.sort_key;
-                                fl.re_sort(key, SortOrder::Descending);
+                                fl.re_sort(key, order);
                             }
                             self.save_settings();
                         }
@@ -637,16 +629,13 @@ impl ViewerApp {
 
                     ui.label(egui::RichText::new("グループ化").size(12.0));
                     {
-                        let current_group = self.file_list.as_ref().map(|fl| fl.group_by).unwrap_or(GroupBy::Off);
-                        if ui.radio_value(&mut current_group.clone(), GroupBy::Off, "オフ").changed() {
+                        let mut group = self.file_list.as_ref().map(|fl| fl.group_by).unwrap_or(GroupBy::Off);
+                        let prev = group;
+                        ui.radio_value(&mut group, GroupBy::Off, "オフ");
+                        ui.radio_value(&mut group, GroupBy::ModifiedDate, "更新日時");
+                        if group != prev {
                             if let Some(fl) = &mut self.file_list {
-                                fl.set_group_by(GroupBy::Off);
-                            }
-                            self.save_settings();
-                        }
-                        if ui.radio_value(&mut current_group.clone(), GroupBy::ModifiedDate, "更新日時").changed() {
-                            if let Some(fl) = &mut self.file_list {
-                                fl.set_group_by(GroupBy::ModifiedDate);
+                                fl.set_group_by(group);
                             }
                             self.save_settings();
                         }
@@ -689,21 +678,14 @@ impl ViewerApp {
 
                     ui.label(egui::RichText::new("回転オプション").size(12.0));
                     {
-                        let prev_rot = self.transform.rotation;
                         let mut rot = self.transform.rotation;
-                        if ui.radio_value(&mut rot, 0, "オフ").changed() {
-                            self.transform.rotation = 0;
-                        }
-                        if ui.radio_value(&mut rot, 270, "左回転").changed() {
-                            self.transform.rotation = 270;
-                        }
-                        if ui.radio_value(&mut rot, 90, "右回転").changed() {
-                            self.transform.rotation = 90;
-                        }
-                        if ui.radio_value(&mut rot, 180, "180度回転").changed() {
-                            self.transform.rotation = 180;
-                        }
-                        if self.transform.rotation != prev_rot {
+                        let prev = rot;
+                        ui.radio_value(&mut rot, 0, "オフ");
+                        ui.radio_value(&mut rot, 270, "左回転");
+                        ui.radio_value(&mut rot, 90, "右回転");
+                        ui.radio_value(&mut rot, 180, "180度回転");
+                        if rot != prev {
+                            self.transform.rotation = rot;
                             self.save_settings();
                         }
                     }
@@ -729,14 +711,11 @@ impl ViewerApp {
                     ui.label(egui::RichText::new("フィット表示").size(12.0));
                     {
                         let mut mode = self.fit_mode;
-                        if ui.radio_value(&mut mode, FitMode::OriginalSize, "オリジナルサイズ").changed() {
-                            self.fit_mode = FitMode::OriginalSize;
-                            self.transform.zoom = 1.0;
-                            self.transform.pan = egui::Vec2::ZERO;
-                            self.save_settings();
-                        }
-                        if ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる").changed() {
-                            self.fit_mode = FitMode::FitToWindow;
+                        let prev = mode;
+                        ui.radio_value(&mut mode, FitMode::OriginalSize, "オリジナルサイズ");
+                        ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる");
+                        if mode != prev {
+                            self.fit_mode = mode;
                             self.transform.zoom = 1.0;
                             self.transform.pan = egui::Vec2::ZERO;
                             self.save_settings();
