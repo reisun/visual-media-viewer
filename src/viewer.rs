@@ -260,6 +260,16 @@ impl eframe::App for ViewerApp {
         // Poll cache for completed preloads.
         self.cache.poll();
 
+        // Handle file drop.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if let Some(path) = dropped.into_iter().next() {
+            self.open_file(&path);
+        }
+
         // Handle keyboard navigation.
         ctx.input(|i| {
             if i.key_pressed(egui::Key::ArrowRight) {
