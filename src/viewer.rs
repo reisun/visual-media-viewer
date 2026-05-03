@@ -29,7 +29,36 @@ impl DecodedImage {
     }
 }
 
-/// Fit display mode.
+fn downscale_for_display(src: &egui::ColorImage, available: egui::Vec2) -> egui::ColorImage {
+    let [w, h] = src.size;
+    let max_w = (available.x * 2.0) as u32;
+    let max_h = (available.y * 2.0) as u32;
+    if w as u32 <= max_w && h as u32 <= max_h {
+        return src.clone();
+    }
+    let scale_x = max_w as f32 / w as f32;
+    let scale_y = max_h as f32 / h as f32;
+    let scale = scale_x.min(scale_y);
+    let new_w = ((w as f32 * scale) as u32).max(1);
+    let new_h = ((h as f32 * scale) as u32).max(1);
+
+    let rgba = image::RgbaImage::from_raw(w as u32, h as u32, {
+        let mut buf = Vec::with_capacity(w * h * 4);
+        for pixel in &src.pixels {
+            buf.push(pixel.r());
+            buf.push(pixel.g());
+            buf.push(pixel.b());
+            buf.push(pixel.a());
+        }
+        buf
+    })
+    .expect("pixel buffer size mismatch");
+
+    let resized = image::imageops::resize(&rgba, new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let size = [resized.width() as usize, resized.height() as usize];
+    egui::ColorImage::from_rgba_unmultiplied(size, resized.as_raw())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FitMode {
     FitToWindow,
@@ -833,19 +862,14 @@ impl eframe::App for ViewerApp {
                     .map(|p| p.to_path_buf());
 
                 if let Some(path) = current_path {
-                    // Ensure texture is loaded.
                     if self.texture.is_none() {
                         if let Some(pixels) = self.cache.get(&path) {
                             self.image_size = Some(pixels.size);
+                            let display_pixels = downscale_for_display(pixels, available);
                             let texture = ctx.load_texture(
                                 "current_image",
-                                pixels.clone(),
-                                egui::TextureOptions {
-                                    magnification: egui::TextureFilter::Linear,
-                                    minification: egui::TextureFilter::Linear,
-                                    mipmap_mode: Some(egui::TextureFilter::Linear),
-                                    ..Default::default()
-                                },
+                                display_pixels,
+                                egui::TextureOptions::LINEAR,
                             );
                             self.texture = Some(texture);
                         }
