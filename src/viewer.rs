@@ -554,182 +554,160 @@ impl ViewerApp {
             });
     }
 
-    /// Draw the title bar right-click menu.
     fn draw_titlebar_menu(&mut self, ctx: &egui::Context) {
-        if !self.show_titlebar_menu {
+        let mut open = self.show_titlebar_menu;
+        if !open {
             return;
         }
 
         let menu_pos = self.titlebar_menu_pos;
-        let area_resp = egui::Area::new(egui::Id::new("titlebar_menu"))
+        egui::Window::new("メニュー")
+            .open(&mut open)
             .fixed_pos(menu_pos)
-            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(220.0)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(220.0);
+                ui.label(egui::RichText::new("リスト").strong().size(13.0));
+                ui.separator();
 
-                    // === リスト section ===
-                    ui.label(egui::RichText::new("リスト").strong().size(13.0));
-                    ui.separator();
+                if ui.button("前のファイル").clicked() {
+                    if let Some(fl) = &mut self.file_list {
+                        fl.prev();
+                    }
+                    self.load_current_image();
+                }
 
-                    if ui.button("前のファイル").clicked() {
-                        self.show_titlebar_menu = false;
-                        // Defer action.
+                if ui.button("次のファイル").clicked() {
+                    if let Some(fl) = &mut self.file_list {
+                        fl.next();
+                    }
+                    self.load_current_image();
+                }
+
+                ui.separator();
+
+                ui.label(egui::RichText::new("並び順（対象）").size(12.0));
+                {
+                    let mut key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
+                    let prev = key;
+                    ui.radio_value(&mut key, SortKey::Name, "名前");
+                    ui.radio_value(&mut key, SortKey::ModifiedDate, "更新日時");
+                    if key != prev {
                         if let Some(fl) = &mut self.file_list {
-                            if fl.prev() {
-                                // Will reload below.
-                            }
+                            let order = fl.sort_order;
+                            fl.re_sort(key, order);
                         }
-                        self.load_current_image();
+                        self.save_settings();
                     }
+                }
 
-                    if ui.button("次のファイル").clicked() {
-                        self.show_titlebar_menu = false;
+                ui.label(egui::RichText::new("並び順（順序）").size(12.0));
+                {
+                    let mut order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
+                    let prev = order;
+                    ui.radio_value(&mut order, SortOrder::Ascending, "昇順");
+                    ui.radio_value(&mut order, SortOrder::Descending, "降順");
+                    if order != prev {
                         if let Some(fl) = &mut self.file_list {
-                            if fl.next() {
-                                // Will reload below.
-                            }
+                            let key = fl.sort_key;
+                            fl.re_sort(key, order);
                         }
-                        self.load_current_image();
+                        self.save_settings();
                     }
+                }
 
-                    ui.separator();
+                ui.separator();
 
-                    ui.label(egui::RichText::new("並び順（対象）").size(12.0));
-                    {
-                        let mut key = self.file_list.as_ref().map(|fl| fl.sort_key).unwrap_or(SortKey::Name);
-                        let prev = key;
-                        ui.radio_value(&mut key, SortKey::Name, "名前");
-                        ui.radio_value(&mut key, SortKey::ModifiedDate, "更新日時");
-                        if key != prev {
-                            if let Some(fl) = &mut self.file_list {
-                                let order = fl.sort_order;
-                                fl.re_sort(key, order);
-                            }
-                            self.save_settings();
+                ui.label(egui::RichText::new("グループ化").size(12.0));
+                {
+                    let mut group = self.file_list.as_ref().map(|fl| fl.group_by).unwrap_or(GroupBy::Off);
+                    let prev = group;
+                    ui.radio_value(&mut group, GroupBy::Off, "オフ");
+                    ui.radio_value(&mut group, GroupBy::ModifiedDate, "更新日時");
+                    if group != prev {
+                        if let Some(fl) = &mut self.file_list {
+                            fl.set_group_by(group);
                         }
+                        self.save_settings();
                     }
+                }
 
-                    ui.label(egui::RichText::new("並び順（順序）").size(12.0));
-                    {
-                        let mut order = self.file_list.as_ref().map(|fl| fl.sort_order).unwrap_or(SortOrder::Ascending);
-                        let prev = order;
-                        ui.radio_value(&mut order, SortOrder::Ascending, "昇順");
-                        ui.radio_value(&mut order, SortOrder::Descending, "降順");
-                        if order != prev {
-                            if let Some(fl) = &mut self.file_list {
-                                let key = fl.sort_key;
-                                fl.re_sort(key, order);
-                            }
-                            self.save_settings();
+                ui.separator();
+
+                ui.label(egui::RichText::new("スライドショー").size(12.0));
+                {
+                    let label = if self.slideshow_active { "停止" } else { "開始" };
+                    if ui.button(label).clicked() {
+                        self.slideshow_active = !self.slideshow_active;
+                        if self.slideshow_active {
+                            self.slideshow_last_advance = ui.ctx().input(|i| i.time);
                         }
                     }
-
-                    ui.separator();
-
-                    ui.label(egui::RichText::new("グループ化").size(12.0));
-                    {
-                        let mut group = self.file_list.as_ref().map(|fl| fl.group_by).unwrap_or(GroupBy::Off);
-                        let prev = group;
-                        ui.radio_value(&mut group, GroupBy::Off, "オフ");
-                        ui.radio_value(&mut group, GroupBy::ModifiedDate, "更新日時");
-                        if group != prev {
-                            if let Some(fl) = &mut self.file_list {
-                                fl.set_group_by(group);
-                            }
-                            self.save_settings();
-                        }
-                    }
-
-                    ui.separator();
-
-                    ui.label(egui::RichText::new("スライドショー").size(12.0));
-                    {
-                        let label = if self.slideshow_active {
-                            "停止"
-                        } else {
-                            "開始"
-                        };
-                        if ui.button(label).clicked() {
-                            self.slideshow_active = !self.slideshow_active;
-                            if self.slideshow_active {
-                                self.slideshow_last_advance = ui.ctx().input(|i| i.time);
-                            }
-                            self.show_titlebar_menu = false;
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("時間:");
-                        let mut interval = self.slideshow_interval;
-                        let drag = egui::DragValue::new(&mut interval)
-                            .range(1.0..=30.0)
-                            .speed(0.1)
-                            .suffix("s")
-                            .fixed_decimals(1);
-                        if ui.add(drag).changed() {
-                            self.slideshow_interval = interval;
-                        }
-                    });
-
-                    ui.add_space(8.0);
-
-                    ui.label(egui::RichText::new("表示").strong().size(13.0));
-                    ui.separator();
-
-                    ui.label(egui::RichText::new("回転オプション").size(12.0));
-                    {
-                        let mut rot = self.transform.rotation;
-                        let prev = rot;
-                        ui.radio_value(&mut rot, 0, "オフ");
-                        ui.radio_value(&mut rot, 270, "左回転");
-                        ui.radio_value(&mut rot, 90, "右回転");
-                        ui.radio_value(&mut rot, 180, "180度回転");
-                        if rot != prev {
-                            self.transform.rotation = rot;
-                            self.save_settings();
-                        }
-                    }
-
-                    ui.separator();
-
-                    if ui.button("ズームイン").clicked() {
-                        self.transform.zoom = (self.transform.zoom * 1.25).clamp(0.1, 50.0);
-                        self.show_titlebar_menu = false;
-                    }
-                    if ui.button("ズームアウト").clicked() {
-                        self.transform.zoom = (self.transform.zoom / 1.25).clamp(0.1, 50.0);
-                        self.show_titlebar_menu = false;
-                    }
-                    if ui.button("ズームリセット").clicked() {
-                        self.transform.zoom = 1.0;
-                        self.transform.pan = egui::Vec2::ZERO;
-                        self.show_titlebar_menu = false;
-                    }
-
-                    ui.separator();
-
-                    ui.label(egui::RichText::new("フィット表示").size(12.0));
-                    {
-                        let mut mode = self.fit_mode;
-                        let prev = mode;
-                        ui.radio_value(&mut mode, FitMode::OriginalSize, "オリジナルサイズ");
-                        ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる");
-                        if mode != prev {
-                            self.fit_mode = mode;
-                            self.transform.zoom = 1.0;
-                            self.transform.pan = egui::Vec2::ZERO;
-                            self.save_settings();
-                        }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("時間:");
+                    let mut interval = self.slideshow_interval;
+                    let drag = egui::DragValue::new(&mut interval)
+                        .range(1.0..=30.0)
+                        .speed(0.1)
+                        .suffix("s")
+                        .fixed_decimals(1);
+                    if ui.add(drag).changed() {
+                        self.slideshow_interval = interval;
                     }
                 });
+
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new("表示").strong().size(13.0));
+                ui.separator();
+
+                ui.label(egui::RichText::new("回転オプション").size(12.0));
+                {
+                    let mut rot = self.transform.rotation;
+                    let prev = rot;
+                    ui.radio_value(&mut rot, 0, "オフ");
+                    ui.radio_value(&mut rot, 270, "左回転");
+                    ui.radio_value(&mut rot, 90, "右回転");
+                    ui.radio_value(&mut rot, 180, "180度回転");
+                    if rot != prev {
+                        self.transform.rotation = rot;
+                        self.save_settings();
+                    }
+                }
+
+                ui.separator();
+
+                if ui.button("ズームイン").clicked() {
+                    self.transform.zoom = (self.transform.zoom * 1.25).clamp(0.1, 50.0);
+                }
+                if ui.button("ズームアウト").clicked() {
+                    self.transform.zoom = (self.transform.zoom / 1.25).clamp(0.1, 50.0);
+                }
+                if ui.button("ズームリセット").clicked() {
+                    self.transform.zoom = 1.0;
+                    self.transform.pan = egui::Vec2::ZERO;
+                }
+
+                ui.separator();
+
+                ui.label(egui::RichText::new("フィット表示").size(12.0));
+                {
+                    let mut mode = self.fit_mode;
+                    let prev = mode;
+                    ui.radio_value(&mut mode, FitMode::OriginalSize, "オリジナルサイズ");
+                    ui.radio_value(&mut mode, FitMode::FitToWindow, "ウインドウに合わせる");
+                    if mode != prev {
+                        self.fit_mode = mode;
+                        self.transform.zoom = 1.0;
+                        self.transform.pan = egui::Vec2::ZERO;
+                        self.save_settings();
+                    }
+                }
             });
 
-        // Close menu if clicking outside it.
-        let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
-            && !area_resp.response.hovered();
-        if clicked_elsewhere {
-            self.show_titlebar_menu = false;
-        }
+        self.show_titlebar_menu = open;
     }
 }
 
