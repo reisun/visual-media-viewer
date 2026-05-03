@@ -1,0 +1,14 @@
+[package]
+name = "visual-media-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance image viewer powered by Rust + wgpu + egui"
+
+[dependencies]
+wgpu = "24"
+egui = "0.31"
+eframe = { version = "0.31", features = ["wgpu"] }
+image = "0.25"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
