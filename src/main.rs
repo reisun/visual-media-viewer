@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod cache;
 mod file_list;
 mod viewer;
@@ -9,8 +11,7 @@ use viewer::ViewerApp;
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
-    // Parse command-line arguments: first argument is the image file path.
-    let initial_path: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
+    let initial_path: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from);
 
     let title = match &initial_path {
         Some(path) => {
@@ -26,7 +27,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
-            .with_title(&title),
+            .with_title(&title)
+            .with_drag_and_drop(true),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
