@@ -129,6 +129,18 @@ pub struct ViewerApp {
     transform: ViewTransform,
     /// Error message to display if image loading fails.
     error_message: Option<String>,
+    /// Slideshow active state.
+    slideshow_active: bool,
+    /// Slideshow interval in seconds.
+    slideshow_interval: f64,
+    /// Timestamp of the last slideshow advance.
+    slideshow_last_advance: f64,
+    /// Whether to show the property overlay.
+    show_properties: bool,
+    /// Right-click context menu state.
+    right_press_pos: Option<egui::Pos2>,
+    show_context_menu: bool,
+    context_menu_pos: egui::Pos2,
 }
 
 impl ViewerApp {
@@ -140,6 +152,13 @@ impl ViewerApp {
             cache: ImageCache::new(10),
             transform: ViewTransform::default(),
             error_message: None,
+            slideshow_active: false,
+            slideshow_interval: 3.0,
+            slideshow_last_advance: 0.0,
+            show_properties: false,
+            right_press_pos: None,
+            show_context_menu: false,
+            context_menu_pos: egui::Pos2::ZERO,
         };
 
         if let Some(path) = initial_path {
@@ -372,6 +391,45 @@ impl eframe::App for ViewerApp {
                     self.transform.rotate_ccw();
                 }
             }
+
+            // Slideshow: S = toggle, +/= = increase interval, - = decrease interval.
+            let slideshow_toggle = ctx.input(|i| i.key_pressed(egui::Key::S));
+            if slideshow_toggle {
+                self.slideshow_active = !self.slideshow_active;
+                if self.slideshow_active {
+                    self.slideshow_last_advance = ctx.input(|i| i.time);
+                }
+            }
+
+            let interval_change = ctx.input(|i| {
+                if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                    return Some(1.0_f64);
+                }
+                if i.key_pressed(egui::Key::Minus) {
+                    return Some(-1.0_f64);
+                }
+                None
+            });
+            if let Some(delta) = interval_change {
+                self.slideshow_interval = (self.slideshow_interval + delta).clamp(1.0, 30.0);
+            }
+
+            // Property overlay: I = toggle.
+            let toggle_props = ctx.input(|i| i.key_pressed(egui::Key::I));
+            if toggle_props {
+                self.show_properties = !self.show_properties;
+            }
+        }
+
+        // Slideshow timer.
+        if self.slideshow_active {
+            let now = ctx.input(|i| i.time);
+            if now - self.slideshow_last_advance >= self.slideshow_interval {
+                self.slideshow_last_advance = now;
+                self.next_image();
+            }
+            let remaining = self.slideshow_interval - (ctx.input(|i| i.time) - self.slideshow_last_advance);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.01)));
         }
 
         // Update window title.
