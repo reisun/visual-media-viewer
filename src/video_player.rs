@@ -165,6 +165,19 @@ impl VideoPlayer {
         })
     }
 
+    fn finalize_seek_if_needed(&mut self) {
+        if !self.awaiting_seek_frame {
+            return;
+        }
+        self.awaiting_seek_frame = false;
+        self.audio_flush.store(false, Ordering::Relaxed);
+        if let Some(ref frame) = self.current_frame {
+            self.playback_start = Instant::now();
+            self.playback_start_pts = frame.pts;
+            self.paused_elapsed = 0.0;
+        }
+    }
+
     pub fn poll_frame(&mut self) -> Option<&VideoFrame> {
         if !matches!(self.state, PlaybackState::Playing) {
             return self.current_frame.as_ref();
@@ -176,17 +189,8 @@ impl VideoPlayer {
         loop {
             if let Some(ref buffered) = self.buffered_frame {
                 if buffered.pts <= elapsed + 0.005 {
-                    let was_awaiting = self.awaiting_seek_frame;
                     self.current_frame = self.buffered_frame.take();
-                    if was_awaiting {
-                        self.awaiting_seek_frame = false;
-                        self.audio_flush.store(false, Ordering::Relaxed);
-                        if let Some(ref frame) = self.current_frame {
-                            self.playback_start = Instant::now();
-                            self.playback_start_pts = frame.pts;
-                            self.paused_elapsed = 0.0;
-                        }
-                    }
+                    self.finalize_seek_if_needed();
                 } else {
                     break;
                 }
@@ -199,27 +203,12 @@ impl VideoPlayer {
             match rx.try_recv() {
                 Ok(frame) => {
                     if frame.pts <= elapsed + 0.005 {
-                        let was_awaiting = self.awaiting_seek_frame;
                         self.current_frame = Some(frame);
-                        if was_awaiting {
-                            self.awaiting_seek_frame = false;
-                            self.audio_flush.store(false, Ordering::Relaxed);
-                            if let Some(ref frame) = self.current_frame {
-                                self.playback_start = Instant::now();
-                                self.playback_start_pts = frame.pts;
-                                self.paused_elapsed = 0.0;
-                            }
-                        }
+                        self.finalize_seek_if_needed();
                     } else {
                         if self.awaiting_seek_frame {
-                            self.awaiting_seek_frame = false;
-                            self.audio_flush.store(false, Ordering::Relaxed);
                             self.current_frame = Some(frame);
-                            if let Some(ref frame) = self.current_frame {
-                                self.playback_start = Instant::now();
-                                self.playback_start_pts = frame.pts;
-                                self.paused_elapsed = 0.0;
-                            }
+                            self.finalize_seek_if_needed();
                         } else {
                             self.buffered_frame = Some(frame);
                         }
@@ -425,6 +414,24 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     Ok(stream)
 }
 
+fn copy_rgba_frame(rgba_frame: &ffmpeg_next::frame::Video, buf: &mut Vec<u8>) -> (u32, u32) {
+    let width = rgba_frame.width();
+    let height = rgba_frame.height();
+    let stride = rgba_frame.stride(0);
+    let row_bytes = width as usize * 4;
+    let data = rgba_frame.data(0);
+    buf.clear();
+    if stride == row_bytes {
+        buf.extend_from_slice(&data[..row_bytes * height as usize]);
+    } else {
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            buf.extend_from_slice(&data[row_start..row_start + row_bytes]);
+        }
+    }
+    (width, height)
+}
+
 fn decoder_loop(
     video_idx: usize,
     video_time_base: f64,
@@ -527,27 +534,9 @@ fn decoder_loop(
                 if scaler.run(&decoded_frame, &mut rgba_frame).is_err() {
                     continue;
                 }
-                let width = rgba_frame.width();
-                let height = rgba_frame.height();
-                let stride = rgba_frame.stride(0);
-                let row_bytes = width as usize * 4;
-                let data = rgba_frame.data(0);
-                reuse_buf.clear();
-                if stride == row_bytes {
-                    reuse_buf.extend_from_slice(&data[..row_bytes * height as usize]);
-                } else {
-                    for y in 0..height as usize {
-                        let row_start = y * stride;
-                        reuse_buf.extend_from_slice(&data[row_start..row_start + row_bytes]);
-                    }
-                }
+                let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
                 if frame_tx
-                    .send(VideoFrame {
-                        rgba: reuse_buf.clone(),
-                        width,
-                        height,
-                        pts,
-                    })
+                    .send(VideoFrame { rgba: reuse_buf.clone(), width, height, pts })
                     .is_err()
                 {
                     return;
@@ -580,35 +569,15 @@ fn decoder_loop(
         }
     }
 
-    // Flush video
     let _ = video_decoder.send_eof();
     while video_decoder.receive_frame(&mut decoded_frame).is_ok() {
         if scaler.run(&decoded_frame, &mut rgba_frame).is_ok() {
-            let width = rgba_frame.width();
-            let height = rgba_frame.height();
-            let stride = rgba_frame.stride(0);
-            let row_bytes = width as usize * 4;
-            let data = rgba_frame.data(0);
-            reuse_buf.clear();
-            if stride == row_bytes {
-                reuse_buf.extend_from_slice(&data[..row_bytes * height as usize]);
-            } else {
-                for y in 0..height as usize {
-                    let row_start = y * stride;
-                    reuse_buf.extend_from_slice(&data[row_start..row_start + row_bytes]);
-                }
-            }
+            let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
             let pts = decoded_frame.pts().unwrap_or(0) as f64 * video_time_base;
-            let _ = frame_tx.send(VideoFrame {
-                rgba: reuse_buf.clone(),
-                width,
-                height,
-                pts,
-            });
+            let _ = frame_tx.send(VideoFrame { rgba: reuse_buf.clone(), width, height, pts });
         }
     }
 
-    // Flush audio
     if let Some(ref mut adec) = audio_decoder {
         let _ = adec.send_eof();
         while adec.receive_frame(&mut audio_frame).is_ok() {

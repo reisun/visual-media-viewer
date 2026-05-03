@@ -2,6 +2,7 @@
 
 mod cache;
 mod file_list;
+mod image_decode;
 mod ipc;
 mod settings;
 mod video_player;
