@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// Supported image file extensions (lowercase).
-const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp"];
+const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
 
 /// A segment of a filename for natural sort comparison.
 #[derive(Debug, PartialEq, Eq)]
@@ -168,6 +168,9 @@ mod tests {
         assert!(is_supported_image(Path::new("photo.Png")));
         assert!(is_supported_image(Path::new("photo.gif")));
         assert!(is_supported_image(Path::new("photo.bmp")));
+        assert!(is_supported_image(Path::new("photo.webp")));
+        assert!(is_supported_image(Path::new("photo.tiff")));
+        assert!(is_supported_image(Path::new("photo.TIF")));
         assert!(!is_supported_image(Path::new("photo.txt")));
         assert!(!is_supported_image(Path::new("noext")));
     }
