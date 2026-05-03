@@ -8,7 +8,7 @@ High-performance image and media viewer built with Rust + wgpu + egui. Targeting
 - **GPU Rendering:** wgpu
 - **GUI Framework:** egui + eframe (wgpu backend)
 - **Image Decoding:** image crate (JPEG, PNG, GIF, BMP)
-- **Async Runtime:** tokio (for preloading)
+- **Background Decoding:** std::thread + std::sync::mpsc (preloading)
 - **Logging:** log + env_logger
 
 ## Build
@@ -26,7 +26,10 @@ Output: `target-docker/x86_64-pc-windows-gnu/release/visual-media-viewer.exe`
 ```
 visual-media-viewer/
   src/
-    main.rs          # Application entry point, eframe setup
+    main.rs          # Application entry point, CLI arg parsing, eframe setup
+    viewer.rs        # ViewerApp: image display, zoom/pan, keyboard input
+    file_list.rs     # FileList: directory scan, sorted navigation, extension filter
+    cache.rs         # ImageCache: LRU cache with background preload (std::thread)
   scripts/
     build.sh         # Build script (wraps docker compose)
   Cargo.toml         # Rust dependencies

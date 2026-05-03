@@ -1,12 +1,32 @@
+mod cache;
+mod file_list;
+mod viewer;
+
 use eframe::egui;
+use std::path::PathBuf;
+use viewer::ViewerApp;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    // Parse command-line arguments: first argument is the image file path.
+    let initial_path: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
+
+    let title = match &initial_path {
+        Some(path) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Visual Media Viewer".to_string());
+            format!("{} - Visual Media Viewer", name)
+        }
+        None => "Visual Media Viewer".to_string(),
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
-            .with_title("Visual Media Viewer"),
+            .with_title(&title),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
@@ -14,19 +34,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Visual Media Viewer",
         options,
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(move |_cc| Ok(Box::new(ViewerApp::new(initial_path)))),
     )
-}
-
-#[derive(Default)]
-struct App;
-
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.label("Visual Media Viewer - Ready");
-            });
-        });
-    }
 }
