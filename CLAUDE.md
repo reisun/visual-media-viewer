@@ -41,16 +41,23 @@ visual-media-viewer/
 
 ## Keyboard Shortcuts
 - **Arrow Left/Right:** Navigate previous/next image (loops)
+- **Arrow Up/Down:** Navigate to previous/next sibling folder
+- **PgUp:** Navigate to parent directory
+- **PgDn:** Navigate into first child subdirectory with images
 - **R:** Rotate clockwise 90 degrees
 - **Shift+R:** Rotate counter-clockwise 90 degrees
 - **S:** Toggle slideshow
-- **+/=:** Increase slideshow interval (+1s, max 30s)
-- **-:** Decrease slideshow interval (-1s, min 1s)
-- **I:** Toggle property info overlay
+- **+/=:** Increase slideshow interval (+0.1s, max 30s)
+- **-:** Decrease slideshow interval (-0.1s, min 1s)
 - **Mouse wheel:** Zoom in/out
 - **Right-click drag:** Zoom by vertical movement
-- **Right-click (no drag):** Context menu
 - **Double-click:** Reset view to fit
+
+## Title Bar
+- Custom title bar (no OS decorations)
+- Title format: `親フォルダ/ファイル名 (現在 / 画像件数)` + slideshow indicator `<自動: X.Xs>`
+- Drag to move window, double-click to maximize/restore
+- Right-click to open menu (リスト / 表示)
 
 ## Development
 - All builds run inside Docker (do not install Rust in WSL2)
