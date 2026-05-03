@@ -34,7 +34,6 @@ mod win_sort {
     }
 }
 
-/// Returns true if the path has a supported image extension (case-insensitive).
 fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -45,7 +44,6 @@ fn is_supported_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true if the path has a supported video extension (case-insensitive).
 fn is_supported_video(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -56,17 +54,14 @@ fn is_supported_video(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true if the path is a supported media file (image or video).
 fn is_supported_media(path: &Path) -> bool {
     is_supported_image(path) || is_supported_video(path)
 }
 
-/// Public helper: returns true if the given path is a video file.
 pub fn is_video_file(path: &Path) -> bool {
     is_supported_video(path)
 }
 
-/// Returns true if a directory contains at least one supported media file (image or video).
 pub fn directory_has_images(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
         Ok(entries) => entries
@@ -79,28 +74,24 @@ pub fn directory_has_images(dir: &Path) -> bool {
     }
 }
 
-/// Sort key for file list ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Name,
     ModifiedDate,
 }
 
-/// Sort order (ascending or descending).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
     Ascending,
     Descending,
 }
 
-/// Grouping mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupBy {
     Off,
     ModifiedDate,
 }
 
-/// Date group categories (ordered from newest to oldest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DateGroup {
     Today = 0,
@@ -135,7 +126,6 @@ fn classify_date_group(file_time: SystemTime) -> DateGroup {
     }
 }
 
-/// Manages a sorted list of image files in a directory for navigation.
 pub struct FileList {
     files: Vec<PathBuf>,
     current_index: usize,
@@ -220,24 +210,20 @@ impl FileList {
         self.group_by = group;
     }
 
-    /// Set the current index to the file matching the given path.
     pub fn set_current(&mut self, path: &Path) {
         if let Some(idx) = self.files.iter().position(|f| f == path) {
             self.current_index = idx;
         }
     }
 
-    /// Get the current file path.
     pub fn current_path(&self) -> Option<&Path> {
         self.files.get(self.current_index).map(|p| p.as_path())
     }
 
-    /// Get the directory this file list was built from.
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// Move to the next file (wraps around to first). Returns true if the index changed.
     pub fn next(&mut self) -> bool {
         if self.files.len() <= 1 {
             return false;
@@ -250,7 +236,6 @@ impl FileList {
         true
     }
 
-    /// Move to the previous file (wraps around to last). Returns true if the index changed.
     pub fn prev(&mut self) -> bool {
         if self.files.len() <= 1 {
             return false;
@@ -263,18 +248,14 @@ impl FileList {
         true
     }
 
-    /// Get the total number of files.
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
 
-    /// Get the current index (0-based).
     pub fn current_index(&self) -> usize {
         self.current_index
     }
 
-    /// Get paths of nearby files (within `range` of current index).
-    /// Used for preloading.
     pub fn nearby_paths(&self, range: usize) -> Vec<PathBuf> {
         let start = self.current_index.saturating_sub(range);
         let end = (self.current_index + range + 1).min(self.files.len());

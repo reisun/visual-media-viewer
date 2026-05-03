@@ -1,241 +1,13 @@
 use eframe::egui;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
 use crate::cache::ImageCache;
 use crate::file_list::{self, FileList, GroupBy, SortKey, SortOrder};
+use crate::image_decode::{self, DecodedImage};
 use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
 use crate::video_player::{PlaybackState, VideoPlayer};
-
-/// Decoded image data ready to be uploaded to GPU.
-pub struct DecodedImage {
-    pub pixels: egui::ColorImage,
-}
-
-impl DecodedImage {
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .unwrap_or_default();
-
-        if ext == "heic" || ext == "heif" {
-            return Self::load_wic(path);
-        }
-
-        match Self::load_image_crate(path) {
-            Ok(img) => Ok(img),
-            Err(_) => Self::load_wic(path),
-        }
-    }
-
-    fn load_image_crate(path: &Path) -> Result<Self, String> {
-        let file = File::open(path)
-            .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
-        let reader = image::ImageReader::new(BufReader::new(file))
-            .with_guessed_format()
-            .map_err(|e| format!("Failed to detect format {}: {}", path.display(), e))?;
-        let img = reader
-            .decode()
-            .map_err(|e| format!("Failed to decode {}: {}", path.display(), e))?;
-        let rgba = img.to_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        let pixels = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-        Ok(Self { pixels })
-    }
-
-    fn load_wic(path: &Path) -> Result<Self, String> {
-        let pixels = crate::wic_decoder::decode_with_wic(path)?;
-        Ok(Self { pixels })
-    }
-}
-
-fn compute_mip_levels(width: u32, height: u32) -> u32 {
-    (width.max(height) as f32).log2().floor() as u32 + 1
-}
-
-fn box_filter_mip(data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let new_w = (width / 2).max(1);
-    let new_h = (height / 2).max(1);
-    let w = width as usize;
-    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
-    for y in 0..new_h as usize {
-        for x in 0..new_w as usize {
-            let sx = x * 2;
-            let sy = y * 2;
-            let mut r = 0u32;
-            let mut g = 0u32;
-            let mut b = 0u32;
-            let mut a = 0u32;
-            for dy in 0..2usize {
-                for dx in 0..2usize {
-                    let px = (sx + dx).min(width as usize - 1);
-                    let py = (sy + dy).min(height as usize - 1);
-                    let idx = (py * w + px) * 4;
-                    r += data[idx] as u32;
-                    g += data[idx + 1] as u32;
-                    b += data[idx + 2] as u32;
-                    a += data[idx + 3] as u32;
-                }
-            }
-            let oi = (y * new_w as usize + x) * 4;
-            out[oi] = (r / 4) as u8;
-            out[oi + 1] = (g / 4) as u8;
-            out[oi + 2] = (b / 4) as u8;
-            out[oi + 3] = (a / 4) as u8;
-        }
-    }
-    (out, new_w, new_h)
-}
-
-fn color_image_to_rgba(img: &egui::ColorImage) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(img.pixels.len() * 4);
-    for pixel in &img.pixels {
-        buf.push(pixel.r());
-        buf.push(pixel.g());
-        buf.push(pixel.b());
-        buf.push(pixel.a());
-    }
-    buf
-}
-
-fn nearest_half_from_pixels(src: &[egui::Color32], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let new_w = width / 2;
-    let new_h = height / 2;
-    let stride = width as usize;
-    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
-    for y in 0..new_h as usize {
-        let row = y * 2 * stride;
-        for x in 0..new_w as usize {
-            let p = src[row + x * 2];
-            out.push(p.r());
-            out.push(p.g());
-            out.push(p.b());
-            out.push(p.a());
-        }
-    }
-    (out, new_w, new_h)
-}
-
-fn nearest_half_rgba(src: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let new_w = width / 2;
-    let new_h = height / 2;
-    let stride = width as usize * 4;
-    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
-    for y in 0..new_h as usize {
-        let row = y * 2 * stride;
-        for x in 0..new_w as usize {
-            let idx = row + x * 2 * 4;
-            out.push(src[idx]);
-            out.push(src[idx + 1]);
-            out.push(src[idx + 2]);
-            out.push(src[idx + 3]);
-        }
-    }
-    (out, new_w, new_h)
-}
-
-fn create_mipmapped_texture(
-    render_state: &eframe::egui_wgpu::RenderState,
-    pixels: &egui::ColorImage,
-) -> (egui::TextureId, wgpu::Texture, [usize; 2]) {
-    let device = &render_state.device;
-    let queue = &render_state.queue;
-    let max_dim = device.limits().max_texture_dimension_2d;
-
-    let orig_w = pixels.size[0] as u32;
-    let orig_h = pixels.size[1] as u32;
-
-    let (mut data, mut w, mut h) = if orig_w > max_dim || orig_h > max_dim {
-        let (d, nw, nh) = nearest_half_from_pixels(&pixels.pixels, orig_w, orig_h);
-        (d, nw, nh)
-    } else {
-        (color_image_to_rgba(pixels), orig_w, orig_h)
-    };
-
-    while w > max_dim || h > max_dim {
-        let (shrunk, nw, nh) = nearest_half_rgba(&data, w, h);
-        data = shrunk;
-        w = nw;
-        h = nh;
-    }
-
-    let actual_size = [w as usize, h as usize];
-    let mip_levels = compute_mip_levels(w, h);
-
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("mipmapped_image"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: mip_levels,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * 4),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    let mut current_data = data;
-    let mut current_w = w;
-    let mut current_h = h;
-    for level in 1..mip_levels {
-        let (mip_data, mip_w, mip_h) = box_filter_mip(&current_data, current_w, current_h);
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &mip_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(mip_w * 4),
-                rows_per_image: Some(mip_h),
-            },
-            wgpu::Extent3d {
-                width: mip_w,
-                height: mip_h,
-                depth_or_array_layers: 1,
-            },
-        );
-        current_data = mip_data;
-        current_w = mip_w;
-        current_h = mip_h;
-    }
-
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut renderer = render_state.renderer.write();
-    let tex_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
-    (tex_id, texture, actual_size)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FitMode {
@@ -243,18 +15,12 @@ enum FitMode {
     OriginalSize,
 }
 
-/// Zoom, pan, and rotation state for the viewer.
 struct ViewTransform {
     zoom: f32,
-    /// Offset in image pixels from center.
     pan: egui::Vec2,
-    /// Display rotation in degrees (0, 90, 180, 270).
     rotation: u16,
-    /// Whether the user is currently dragging with right-click.
     right_drag_active: bool,
-    /// The screen position where right-click drag started.
     right_drag_start_y: f32,
-    /// The zoom level when right-click drag started.
     right_drag_start_zoom: f32,
 }
 
@@ -291,7 +57,6 @@ impl ViewTransform {
         self.rotation = (self.rotation + 270) % 360;
     }
 
-    /// Get UV coordinates for the four corners based on rotation.
     fn rotated_uvs(&self) -> [egui::Pos2; 4] {
         match self.rotation {
             0 => [
@@ -327,13 +92,11 @@ impl ViewTransform {
         }
     }
 
-    /// Returns true if the rotation swaps width and height.
     fn is_rotated_90_or_270(&self) -> bool {
         self.rotation == 90 || self.rotation == 270
     }
 }
 
-/// Main application state.
 pub struct ViewerApp {
     texture_id: Option<egui::TextureId>,
     wgpu_texture: Option<wgpu::Texture>,
@@ -428,7 +191,6 @@ impl ViewerApp {
         self.video_size = None;
     }
 
-    /// Open a file and build the file list from its directory.
     fn open_file(&mut self, path: &Path) {
         let canonical = match std::fs::canonicalize(path) {
             Ok(p) => p,
@@ -528,7 +290,6 @@ impl ViewerApp {
         }
     }
 
-    /// Load the current file (image or video) from the file list.
     fn load_current_image(&mut self) {
         self.free_current_texture();
         self.stop_video();
@@ -579,7 +340,6 @@ impl ViewerApp {
         }
     }
 
-    /// Start preloading images around the current index.
     fn start_preload(&mut self) {
         if let Some(fl) = &self.file_list {
             let paths = fl.nearby_paths(3);
@@ -587,7 +347,6 @@ impl ViewerApp {
         }
     }
 
-    /// Navigate to the next image.
     fn next_image(&mut self) {
         if let Some(fl) = &mut self.file_list {
             if fl.next() {
@@ -596,7 +355,6 @@ impl ViewerApp {
         }
     }
 
-    /// Navigate to the previous image.
     fn prev_image(&mut self) {
         if let Some(fl) = &mut self.file_list {
             if fl.prev() {
@@ -605,7 +363,6 @@ impl ViewerApp {
         }
     }
 
-    /// Build the title text: 親フォルダ/ファイル名 (現在 / 画像件数) [<自動: X.Xs>]
     fn title_text(&self) -> String {
         if let Some(fl) = &self.file_list {
             if let Some(path) = fl.current_path() {
@@ -654,6 +411,25 @@ impl ViewerApp {
     /// Compute the fit-to-window scale for the current image given available size.
     /// Takes rotation into account (90/270 swaps dimensions).
     /// Returns 1.0 in OriginalSize mode.
+    fn compute_display_rect(&self, img_size: &[usize; 2], available: egui::Vec2) -> egui::Rect {
+        let fit = self.fit_scale(available);
+        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
+            (
+                img_size[1] as f32 * fit * self.transform.zoom,
+                img_size[0] as f32 * fit * self.transform.zoom,
+            )
+        } else {
+            (
+                img_size[0] as f32 * fit * self.transform.zoom,
+                img_size[1] as f32 * fit * self.transform.zoom,
+            )
+        };
+        egui::Rect::from_center_size(
+            egui::Pos2::new(available.x / 2.0, available.y / 2.0) + self.transform.pan,
+            egui::vec2(display_w, display_h),
+        )
+    }
+
     fn fit_scale(&self, available: egui::Vec2) -> f32 {
         match self.fit_mode {
             FitMode::OriginalSize => 1.0,
@@ -678,12 +454,10 @@ impl ViewerApp {
         }
     }
 
-    /// Handle zoom interactions (right-click drag, scroll wheel, double-click).
     fn handle_zoom_input(&mut self, response: &egui::Response, _available_size: egui::Vec2) {
         let pointer_pos = response.hover_pos().unwrap_or(response.rect.center());
         let rect_center = response.rect.center();
 
-        // Right-click drag: zoom by vertical movement.
         let secondary_pressed = response.ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
         if secondary_pressed && response.hovered() && !self.show_titlebar_menu {
             self.transform.right_drag_active = true;
@@ -698,7 +472,6 @@ impl ViewerApp {
                 let zoom_factor = (dy / 200.0).exp();
                 let new_zoom = (self.transform.right_drag_start_zoom * zoom_factor).clamp(0.1, 50.0);
 
-                // Zoom towards pointer position.
                 let pointer_offset = pointer_pos - rect_center;
                 let old_zoom = self.transform.zoom;
                 self.transform.zoom = new_zoom;
@@ -776,7 +549,6 @@ impl ViewerApp {
         }
     }
 
-    /// Draw the custom title bar and return whether the menu should be shown.
     fn draw_title_bar(&mut self, ctx: &egui::Context) {
         let title_text = self.title_text();
         let title_bar_height = 28.0;
@@ -795,18 +567,15 @@ impl ViewerApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                // Drag to move window on left-click drag anywhere on the title bar.
                 if bar_response.dragged_by(egui::PointerButton::Primary) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                // Double-click to toggle maximize.
                 if bar_response.double_clicked() {
                     self.is_maximized = !self.is_maximized;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
                 }
 
-                // Right-click on title bar to show menu.
                 if bar_response.secondary_clicked() {
                     self.show_titlebar_menu = !self.show_titlebar_menu;
                     if let Some(pos) = bar_response.hover_pos() {
@@ -827,7 +596,6 @@ impl ViewerApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn_size = egui::vec2(36.0, 24.0);
 
-                        // Close button.
                         let close_btn = ui.add_sized(
                             btn_size,
                             egui::Button::new(
@@ -845,7 +613,6 @@ impl ViewerApp {
                             );
                         }
 
-                        // Maximize/Restore button.
                         let max_label = if self.is_maximized { "[ ]" } else { "[ ]" };
                         let max_btn = ui.add_sized(
                             btn_size,
@@ -858,7 +625,6 @@ impl ViewerApp {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
                         }
 
-                        // Minimize button.
                         let min_btn = ui.add_sized(
                             btn_size,
                             egui::Button::new(
@@ -1132,10 +898,8 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll cache for completed preloads.
         self.cache.poll();
 
-        // Poll IPC for file open requests from other instances.
         if let Ok(path) = self.ipc_rx.try_recv() {
             self.open_file(&path);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1151,10 +915,8 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Handle window edge resize.
         self.handle_window_resize(ctx);
 
-        // Handle file drop.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter()
                 .filter_map(|f| f.path.clone())
@@ -1164,7 +926,6 @@ impl eframe::App for ViewerApp {
             self.open_file(&path);
         }
 
-        // Handle keyboard input.
         {
             let is_video = self.video_player.is_some();
             let nav = ctx.input(|i| {
@@ -1213,7 +974,6 @@ impl eframe::App for ViewerApp {
                 _ => {}
             }
 
-            // Rotation: R = clockwise, Shift+R = counter-clockwise.
             let rotate = ctx.input(|i| {
                 if i.key_pressed(egui::Key::R) {
                     if i.modifiers.shift {
@@ -1232,7 +992,6 @@ impl eframe::App for ViewerApp {
                 self.save_settings();
             }
 
-            // Slideshow: S = toggle, +/= = increase interval, - = decrease interval.
             let slideshow_toggle = ctx.input(|i| i.key_pressed(egui::Key::S));
             if slideshow_toggle {
                 self.slideshow_active = !self.slideshow_active;
@@ -1241,7 +1000,6 @@ impl eframe::App for ViewerApp {
                 }
             }
 
-            // 0.1s increments for slideshow interval.
             let interval_change = ctx.input(|i| {
                 if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
                     return Some(0.1_f64);
@@ -1263,7 +1021,6 @@ impl eframe::App for ViewerApp {
             }
         }
 
-        // Slideshow timer.
         if self.slideshow_active {
             let now = ctx.input(|i| i.time);
             if now - self.slideshow_last_advance >= self.slideshow_interval {
@@ -1274,10 +1031,8 @@ impl eframe::App for ViewerApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.01)));
         }
 
-        // Draw custom title bar.
         self.draw_title_bar(ctx);
 
-        // Draw the title bar right-click menu (if open).
         self.draw_titlebar_menu(ctx);
 
         egui::CentralPanel::default()
@@ -1292,13 +1047,11 @@ impl eframe::App for ViewerApp {
                     return;
                 }
 
-                // Video playback path
                 if self.video_player.is_some() {
                     self.render_video_frame(ui, available);
                     return;
                 }
 
-                // Image display path
                 let current_path = self
                     .file_list
                     .as_ref()
@@ -1309,7 +1062,7 @@ impl eframe::App for ViewerApp {
                     if self.texture_id.is_none() {
                         if let Some(pixels) = self.cache.get(&path) {
                             let (id, tex, actual_size) =
-                                create_mipmapped_texture(&self.render_state, pixels);
+                                image_decode::create_mipmapped_texture(&self.render_state, pixels);
                             self.image_size = Some(actual_size);
                             self.texture_id = Some(id);
                             self.wgpu_texture = Some(tex);
@@ -1317,56 +1070,13 @@ impl eframe::App for ViewerApp {
                     }
 
                     if let (Some(tex_id), Some(img_size)) = (self.texture_id, &self.image_size) {
-                        let fit = self.fit_scale(available);
-
-                        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
-                            (
-                                img_size[1] as f32 * fit * self.transform.zoom,
-                                img_size[0] as f32 * fit * self.transform.zoom,
-                            )
-                        } else {
-                            (
-                                img_size[0] as f32 * fit * self.transform.zoom,
-                                img_size[1] as f32 * fit * self.transform.zoom,
-                            )
-                        };
-
-                        let center = ui.available_rect_before_wrap().center();
-                        let offset = self.transform.pan;
-
-                        let image_rect = egui::Rect::from_center_size(
-                            center + offset,
-                            egui::vec2(display_w, display_h),
-                        );
+                        let image_rect = self.compute_display_rect(img_size, available);
 
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
                         let uvs = self.transform.rotated_uvs();
-                        let mut mesh = egui::Mesh::with_texture(tex_id);
-                        let tint = egui::Color32::WHITE;
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: image_rect.left_top(),
-                            uv: uvs[0],
-                            color: tint,
-                        });
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: image_rect.right_top(),
-                            uv: uvs[1],
-                            color: tint,
-                        });
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: image_rect.right_bottom(),
-                            uv: uvs[2],
-                            color: tint,
-                        });
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: image_rect.left_bottom(),
-                            uv: uvs[3],
-                            color: tint,
-                        });
-                        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-                        painter.add(egui::Shape::mesh(mesh));
+                        image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
 
                         self.handle_zoom_input(&response, available);
                         self.handle_mouse_pan(&response, available);
@@ -1400,43 +1110,17 @@ impl ViewerApp {
             None => return,
         };
 
-        let fit = self.fit_scale(available);
-        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
-            (
-                img_size[1] as f32 * fit * self.transform.zoom,
-                img_size[0] as f32 * fit * self.transform.zoom,
-            )
-        } else {
-            (
-                img_size[0] as f32 * fit * self.transform.zoom,
-                img_size[1] as f32 * fit * self.transform.zoom,
-            )
-        };
-
-        let center = ui.available_rect_before_wrap().center();
-        let offset = self.transform.pan;
-        let image_rect = egui::Rect::from_center_size(
-            center + offset,
-            egui::vec2(display_w, display_h),
-        );
+        let image_rect = self.compute_display_rect(&img_size, available);
 
         let (response, painter) =
             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
         let uvs = self.transform.rotated_uvs();
-        let mut mesh = egui::Mesh::with_texture(tex_id);
-        let tint = egui::Color32::WHITE;
-        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.left_top(), uv: uvs[0], color: tint });
-        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.right_top(), uv: uvs[1], color: tint });
-        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.right_bottom(), uv: uvs[2], color: tint });
-        mesh.vertices.push(egui::epaint::Vertex { pos: image_rect.left_bottom(), uv: uvs[3], color: tint });
-        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-        painter.add(egui::Shape::mesh(mesh));
+        image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
 
         self.handle_zoom_input(&response, available);
         self.handle_mouse_pan(&response, available);
 
-        // Mouse wheel volume control during video playback
         let scroll_delta = response.ctx.input(|i| i.raw_scroll_delta.y);
         if scroll_delta.abs() > 0.0 && response.hovered() {
             if let Some(player) = &self.video_player {
