@@ -1,0 +1,6 @@
+[thresholds]
+modularity = 60
+acyclicity = 80
+depth = 60
+equality = 60
+redundancy = 60

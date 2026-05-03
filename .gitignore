@@ -21,6 +21,3 @@ Thumbs.db
 
 # Environment
 .env
-
-# Tooling state
-.sentrux/
