@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::cache::ImageCache;
-use crate::file_list::{self, FileList, SortKey, SortOrder};
+use crate::file_list::{FileList, SortKey, SortOrder};
 use crate::settings::{FitModeSetting, Settings, SortKeySetting, SortOrderSetting};
 
 /// Decoded image data ready to be uploaded to GPU.
@@ -424,58 +424,23 @@ impl ViewerApp {
         }
     }
 
-    /// Navigate to the previous sibling folder.
-    fn navigate_prev_sibling_folder(&mut self) {
-        if let Some(fl) = &self.file_list {
-            if let Some((dirs, idx)) = fl.sibling_directories() {
-                // Search backwards from current index.
-                for i in (0..idx).rev() {
-                    if file_list::directory_has_images(&dirs[i]) {
-                        self.open_directory(&dirs[i]);
-                        return;
-                    }
-                }
-            }
+    fn navigate_prev_folder(&mut self) {
+        let dir = match &self.file_list {
+            Some(fl) => fl.prev_image_dir(),
+            None => None,
+        };
+        if let Some(d) = dir {
+            self.open_directory(&d);
         }
     }
 
-    /// Navigate to the next sibling folder.
-    fn navigate_next_sibling_folder(&mut self) {
-        if let Some(fl) = &self.file_list {
-            if let Some((dirs, idx)) = fl.sibling_directories() {
-                // Search forwards from current index.
-                for i in (idx + 1)..dirs.len() {
-                    if file_list::directory_has_images(&dirs[i]) {
-                        self.open_directory(&dirs[i]);
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Navigate up one directory level (PgUp).
-    fn navigate_parent_directory(&mut self) {
-        if let Some(fl) = &self.file_list {
-            let dir = fl.directory().to_path_buf();
-            if let Some(parent) = dir.parent() {
-                if file_list::directory_has_images(parent) {
-                    self.open_directory(parent);
-                }
-            }
-        }
-    }
-
-    /// Navigate into the first child subdirectory with images (PgDn).
-    fn navigate_child_directory(&mut self) {
-        if let Some(fl) = &self.file_list {
-            let children = fl.child_directories();
-            for child in children {
-                if file_list::directory_has_images(&child) {
-                    self.open_directory(&child);
-                    return;
-                }
-            }
+    fn navigate_next_folder(&mut self) {
+        let dir = match &self.file_list {
+            Some(fl) => fl.next_image_dir(),
+            None => None,
+        };
+        if let Some(d) = dir {
+            self.open_directory(&d);
         }
     }
 
@@ -787,27 +752,19 @@ impl eframe::App for ViewerApp {
                 if i.key_pressed(egui::Key::ArrowLeft) {
                     return Some("left");
                 }
-                if i.key_pressed(egui::Key::ArrowUp) {
-                    return Some("up");
+                if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::PageUp) {
+                    return Some("prev_folder");
                 }
-                if i.key_pressed(egui::Key::ArrowDown) {
-                    return Some("down");
-                }
-                if i.key_pressed(egui::Key::PageUp) {
-                    return Some("pgup");
-                }
-                if i.key_pressed(egui::Key::PageDown) {
-                    return Some("pgdn");
+                if i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::PageDown) {
+                    return Some("next_folder");
                 }
                 None
             });
             match nav {
                 Some("right") => self.next_image(),
                 Some("left") => self.prev_image(),
-                Some("up") => self.navigate_prev_sibling_folder(),
-                Some("down") => self.navigate_next_sibling_folder(),
-                Some("pgup") => self.navigate_parent_directory(),
-                Some("pgdn") => self.navigate_child_directory(),
+                Some("prev_folder") => self.navigate_prev_folder(),
+                Some("next_folder") => self.navigate_next_folder(),
                 _ => {}
             }
 

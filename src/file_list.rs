@@ -183,41 +183,116 @@ impl FileList {
         self.files[start..end].to_vec()
     }
 
-    /// Get sorted sibling directories of the current directory.
-    /// Returns (list_of_dirs, index_of_current_dir).
-    pub fn sibling_directories(&self) -> Option<(Vec<PathBuf>, usize)> {
-        let parent = self.directory.parent()?;
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(parent)
-            .ok()?
+    /// Find the next directory with images in DFS pre-order traversal.
+    pub fn next_image_dir(&self) -> Option<PathBuf> {
+        next_image_dir_from(&self.directory)
+    }
+
+    /// Find the previous directory with images in DFS pre-order traversal.
+    pub fn prev_image_dir(&self) -> Option<PathBuf> {
+        prev_image_dir_from(&self.directory)
+    }
+}
+
+fn sorted_child_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.is_dir())
-            .collect();
-        dirs.sort_by(|a, b| {
-            let a_name = a.file_name().unwrap_or_default().to_string_lossy();
-            let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-            natord::compare_ignore_case(&a_name, &b_name)
-        });
-        let idx = dirs.iter().position(|d| d == &self.directory)?;
-        Some((dirs, idx))
-    }
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    dirs.sort_by(|a, b| {
+        let a_name = a.file_name().unwrap_or_default().to_string_lossy();
+        let b_name = b.file_name().unwrap_or_default().to_string_lossy();
+        natord::compare_ignore_case(&a_name, &b_name)
+    });
+    dirs
+}
 
-    /// Get child subdirectories of the current directory, sorted by name.
-    pub fn child_directories(&self) -> Vec<PathBuf> {
-        let mut dirs: Vec<PathBuf> = match std::fs::read_dir(&self.directory) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        dirs.sort_by(|a, b| {
-            let a_name = a.file_name().unwrap_or_default().to_string_lossy();
-            let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-            natord::compare_ignore_case(&a_name, &b_name)
-        });
-        dirs
+const MAX_DEPTH: usize = 10;
+
+/// DFS pre-order: find the first directory with images among children of `dir`.
+fn first_image_dir_under(dir: &Path, depth: usize) -> Option<PathBuf> {
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    for child in sorted_child_dirs(dir) {
+        if directory_has_images(&child) {
+            return Some(child);
+        }
+        if let Some(desc) = first_image_dir_under(&child, depth + 1) {
+            return Some(desc);
+        }
+    }
+    None
+}
+
+/// DFS reverse: find the last (deepest, rightmost) directory with images in subtree.
+fn last_image_dir_in_subtree(dir: &Path, depth: usize) -> Option<PathBuf> {
+    if depth >= MAX_DEPTH {
+        if directory_has_images(dir) {
+            return Some(dir.to_path_buf());
+        }
+        return None;
+    }
+    let children = sorted_child_dirs(dir);
+    for child in children.iter().rev() {
+        if let Some(desc) = last_image_dir_in_subtree(child, depth + 1) {
+            return Some(desc);
+        }
+    }
+    if directory_has_images(dir) {
+        return Some(dir.to_path_buf());
+    }
+    None
+}
+
+/// Find next image directory in DFS order from `current`.
+fn next_image_dir_from(current: &Path) -> Option<PathBuf> {
+    // 1. Try children of current first.
+    if let Some(child) = first_image_dir_under(current, 0) {
+        return Some(child);
+    }
+    // 2. Walk up, trying next siblings at each level.
+    let mut dir = current.to_path_buf();
+    loop {
+        let parent = dir.parent()?;
+        let siblings = sorted_child_dirs(parent);
+        if let Some(idx) = siblings.iter().position(|d| d == &dir) {
+            for sibling in &siblings[idx + 1..] {
+                if directory_has_images(sibling) {
+                    return Some(sibling.clone());
+                }
+                if let Some(desc) = first_image_dir_under(sibling, 0) {
+                    return Some(desc);
+                }
+            }
+        }
+        dir = parent.to_path_buf();
+    }
+}
+
+/// Find previous image directory in DFS order from `current`.
+fn prev_image_dir_from(current: &Path) -> Option<PathBuf> {
+    let mut dir = current.to_path_buf();
+    loop {
+        let parent = dir.parent()?;
+        let siblings = sorted_child_dirs(parent);
+        if let Some(idx) = siblings.iter().position(|d| d == &dir) {
+            // Try previous siblings in reverse — go to their deepest last descendant.
+            for sibling in siblings[..idx].iter().rev() {
+                if let Some(desc) = last_image_dir_in_subtree(sibling, 0) {
+                    return Some(desc);
+                }
+            }
+        }
+        // Try parent itself.
+        if directory_has_images(parent) {
+            return Some(parent.to_path_buf());
+        }
+        dir = parent.to_path_buf();
     }
 }
 
