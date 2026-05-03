@@ -28,11 +28,13 @@ impl DecodedImage {
     }
 }
 
-/// Zoom and pan state for the viewer.
+/// Zoom, pan, and rotation state for the viewer.
 struct ViewTransform {
     zoom: f32,
     /// Offset in image pixels from center.
     pan: egui::Vec2,
+    /// Display rotation in degrees (0, 90, 180, 270).
+    rotation: u16,
     /// Whether the user is currently dragging with right-click.
     right_drag_active: bool,
     /// The screen position where right-click drag started.
@@ -46,6 +48,7 @@ impl Default for ViewTransform {
         Self {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            rotation: 0,
             right_drag_active: false,
             right_drag_start_y: 0.0,
             right_drag_start_zoom: 1.0,
@@ -57,7 +60,58 @@ impl ViewTransform {
     fn reset(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
+        self.rotation = 0;
         self.right_drag_active = false;
+    }
+
+    fn rotate_cw(&mut self) {
+        self.rotation = (self.rotation + 90) % 360;
+    }
+
+    fn rotate_ccw(&mut self) {
+        self.rotation = (self.rotation + 270) % 360;
+    }
+
+    /// Get UV coordinates for the four corners based on rotation.
+    /// Returns (top-left, top-right, bottom-right, bottom-left) UV positions.
+    fn rotated_uvs(&self) -> [egui::Pos2; 4] {
+        match self.rotation {
+            0 => [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ],
+            90 => [
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+            ],
+            180 => [
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+            ],
+            270 => [
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+            ],
+            _ => [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ],
+        }
+    }
+
+    /// Returns true if the rotation swaps width and height.
+    fn is_rotated_90_or_270(&self) -> bool {
+        self.rotation == 90 || self.rotation == 270
     }
 }
 
@@ -192,10 +246,14 @@ impl ViewerApp {
     }
 
     /// Compute the fit-to-window scale for the current image given available size.
+    /// Takes rotation into account (90/270 swaps dimensions).
     fn fit_scale(&self, available: egui::Vec2) -> f32 {
         if let Some(size) = self.image_size {
-            let img_w = size[0] as f32;
-            let img_h = size[1] as f32;
+            let (img_w, img_h) = if self.transform.is_rotated_90_or_270() {
+                (size[1] as f32, size[0] as f32)
+            } else {
+                (size[0] as f32, size[1] as f32)
+            };
             if img_w > 0.0 && img_h > 0.0 {
                 let scale_x = available.x / img_w;
                 let scale_y = available.y / img_h;
@@ -278,23 +336,43 @@ impl eframe::App for ViewerApp {
             self.open_file(&path);
         }
 
-        // Handle keyboard navigation.
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::ArrowRight) {
-                return Some(true);
+        // Handle keyboard input.
+        {
+            let nav = ctx.input(|i| {
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    return Some(true);
+                }
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    return Some(false);
+                }
+                None
+            });
+            if let Some(forward) = nav {
+                if forward {
+                    self.next_image();
+                } else {
+                    self.prev_image();
+                }
             }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                return Some(false);
+
+            // Rotation: R = clockwise, Shift+R = counter-clockwise.
+            let rotate = ctx.input(|i| {
+                if i.key_pressed(egui::Key::R) {
+                    if i.modifiers.shift {
+                        return Some(false); // CCW
+                    }
+                    return Some(true); // CW
+                }
+                None
+            });
+            if let Some(cw) = rotate {
+                if cw {
+                    self.transform.rotate_cw();
+                } else {
+                    self.transform.rotate_ccw();
+                }
             }
-            None
-        })
-        .map(|forward| {
-            if forward {
-                self.next_image();
-            } else {
-                self.prev_image();
-            }
-        });
+        }
 
         // Update window title.
         if let Some(filename) = self.current_filename() {
@@ -338,8 +416,19 @@ impl eframe::App for ViewerApp {
 
                     if let (Some(texture), Some(img_size)) = (&self.texture, &self.image_size) {
                         let fit = self.fit_scale(available);
-                        let display_w = img_size[0] as f32 * fit * self.transform.zoom;
-                        let display_h = img_size[1] as f32 * fit * self.transform.zoom;
+
+                        // For 90/270, swap displayed dimensions.
+                        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
+                            (
+                                img_size[1] as f32 * fit * self.transform.zoom,
+                                img_size[0] as f32 * fit * self.transform.zoom,
+                            )
+                        } else {
+                            (
+                                img_size[0] as f32 * fit * self.transform.zoom,
+                                img_size[1] as f32 * fit * self.transform.zoom,
+                            )
+                        };
 
                         let center = ui.available_rect_before_wrap().center();
                         let offset = self.transform.pan;
@@ -353,16 +442,34 @@ impl eframe::App for ViewerApp {
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
-                        // Draw the image.
-                        painter.image(
-                            texture.id(),
-                            image_rect,
-                            egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            ),
-                            egui::Color32::WHITE,
-                        );
+                        // Draw the image using a mesh with rotated UV coordinates.
+                        let uvs = self.transform.rotated_uvs();
+                        let mut mesh = egui::Mesh::with_texture(texture.id());
+                        let tint = egui::Color32::WHITE;
+                        // Vertices: top-left, top-right, bottom-right, bottom-left
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.left_top(),
+                            uv: uvs[0],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.right_top(),
+                            uv: uvs[1],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.right_bottom(),
+                            uv: uvs[2],
+                            color: tint,
+                        });
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: image_rect.left_bottom(),
+                            uv: uvs[3],
+                            color: tint,
+                        });
+                        // Two triangles: 0-1-2 and 0-2-3
+                        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+                        painter.add(egui::Shape::mesh(mesh));
 
                         // Handle zoom interactions.
                         self.handle_zoom_input(&response, available);
