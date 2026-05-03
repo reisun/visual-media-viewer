@@ -8,6 +8,38 @@ use eframe::egui;
 use std::path::PathBuf;
 use viewer::ViewerApp;
 
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Try to load a Japanese system font from Windows.
+    let font_paths = [
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "C:/Windows/Fonts/YuGothR.ttc",
+    ];
+    for path in &font_paths {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "system_jp".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+            );
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .insert(0, "system_jp".to_owned());
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Monospace)
+                .unwrap()
+                .push("system_jp".to_owned());
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -37,6 +69,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Visual Media Viewer",
         options,
-        Box::new(move |_cc| Ok(Box::new(ViewerApp::new(initial_path)))),
+        Box::new(move |cc| {
+            configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(ViewerApp::new(initial_path)))
+        }),
     )
 }

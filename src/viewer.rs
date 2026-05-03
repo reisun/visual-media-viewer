@@ -444,44 +444,50 @@ impl ViewerApp {
                     .inner_margin(egui::Margin::symmetric(8, 0)),
             )
             .show(ctx, |ui| {
+                let bar_response = ui.interact(
+                    ui.available_rect_before_wrap(),
+                    egui::Id::new("title_bar_bg"),
+                    egui::Sense::click_and_drag(),
+                );
+
+                // Drag to move window on left-click drag anywhere on the title bar.
+                if bar_response.dragged_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Double-click to toggle maximize.
+                if bar_response.double_clicked() {
+                    self.is_maximized = !self.is_maximized;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
+                }
+
+                // Right-click on title bar to show menu.
+                if bar_response.secondary_clicked() {
+                    self.show_titlebar_menu = !self.show_titlebar_menu;
+                    if let Some(pos) = bar_response.hover_pos() {
+                        self.titlebar_menu_pos = pos;
+                    }
+                }
+
                 ui.horizontal_centered(|ui| {
-                    // Title text (takes remaining space).
-                    let title_response = ui.add(
+                    ui.add(
                         egui::Label::new(
                             egui::RichText::new(&title_text)
                                 .color(egui::Color32::from_gray(220))
                                 .size(13.0),
-                        )
-                        .sense(egui::Sense::click_and_drag()),
+                        ),
                     );
-
-                    // Drag to move window on left-click drag.
-                    if title_response.dragged_by(egui::PointerButton::Primary) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-
-                    // Double-click to toggle maximize.
-                    if title_response.double_clicked() {
-                        self.is_maximized = !self.is_maximized;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
-                    }
-
-                    // Right-click on title bar to show menu.
-                    if title_response.secondary_clicked() {
-                        self.show_titlebar_menu = !self.show_titlebar_menu;
-                        if let Some(pos) = title_response.hover_pos() {
-                            self.titlebar_menu_pos = pos;
-                        }
-                    }
 
                     // Right-align the window control buttons.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn_size = egui::vec2(36.0, 24.0);
+
                         // Close button.
-                        let close_btn = ui.add(
+                        let close_btn = ui.add_sized(
+                            btn_size,
                             egui::Button::new(
-                                egui::RichText::new("\u{2715}").color(egui::Color32::from_gray(200)).size(14.0),
-                            )
-                            .frame(false),
+                                egui::RichText::new("X").color(egui::Color32::from_gray(200)).size(13.0),
+                            ).frame(false),
                         );
                         if close_btn.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -495,12 +501,12 @@ impl ViewerApp {
                         }
 
                         // Maximize/Restore button.
-                        let max_icon = if self.is_maximized { "\u{2752}" } else { "\u{25a1}" };
-                        let max_btn = ui.add(
+                        let max_label = if self.is_maximized { "[ ]" } else { "[ ]" };
+                        let max_btn = ui.add_sized(
+                            btn_size,
                             egui::Button::new(
-                                egui::RichText::new(max_icon).color(egui::Color32::from_gray(200)).size(14.0),
-                            )
-                            .frame(false),
+                                egui::RichText::new(max_label).color(egui::Color32::from_gray(200)).size(11.0),
+                            ).frame(false),
                         );
                         if max_btn.clicked() {
                             self.is_maximized = !self.is_maximized;
@@ -508,11 +514,11 @@ impl ViewerApp {
                         }
 
                         // Minimize button.
-                        let min_btn = ui.add(
+                        let min_btn = ui.add_sized(
+                            btn_size,
                             egui::Button::new(
-                                egui::RichText::new("\u{2500}").color(egui::Color32::from_gray(200)).size(14.0),
-                            )
-                            .frame(false),
+                                egui::RichText::new("_").color(egui::Color32::from_gray(200)).size(13.0),
+                            ).frame(false),
                         );
                         if min_btn.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
