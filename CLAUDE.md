@@ -7,7 +7,7 @@ High-performance image and media viewer built with Rust + wgpu + egui. Targeting
 - **Language:** Rust
 - **GPU Rendering:** wgpu
 - **GUI Framework:** egui + eframe (wgpu backend)
-- **Image Decoding:** image crate (JPEG, PNG, GIF, BMP)
+- **Image Decoding:** image crate (JPEG, PNG, GIF, BMP, WebP, TIFF)
 - **Background Decoding:** std::thread + std::sync::mpsc (preloading)
 - **Logging:** log + env_logger
 
@@ -38,6 +38,19 @@ visual-media-viewer/
   TASK.md            # Project roadmap and task tracking
   CLAUDE.md          # This file
 ```
+
+## Keyboard Shortcuts
+- **Arrow Left/Right:** Navigate previous/next image (loops)
+- **R:** Rotate clockwise 90 degrees
+- **Shift+R:** Rotate counter-clockwise 90 degrees
+- **S:** Toggle slideshow
+- **+/=:** Increase slideshow interval (+1s, max 30s)
+- **-:** Decrease slideshow interval (-1s, min 1s)
+- **I:** Toggle property info overlay
+- **Mouse wheel:** Zoom in/out
+- **Right-click drag:** Zoom by vertical movement
+- **Right-click (no drag):** Context menu
+- **Double-click:** Reset view to fit
 
 ## Development
 - All builds run inside Docker (do not install Rust in WSL2)
