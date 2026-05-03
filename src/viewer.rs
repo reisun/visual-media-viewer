@@ -1,4 +1,6 @@
 use eframe::egui;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::cache::ImageCache;
@@ -10,9 +12,15 @@ pub struct DecodedImage {
 }
 
 impl DecodedImage {
-    /// Decode an image file into an egui ColorImage.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let img = image::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let file = File::open(path)
+            .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let reader = image::ImageReader::new(BufReader::new(file))
+            .with_guessed_format()
+            .map_err(|e| format!("Failed to detect format {}: {}", path.display(), e))?;
+        let img = reader
+            .decode()
+            .map_err(|e| format!("Failed to decode {}: {}", path.display(), e))?;
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
         let pixels = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
