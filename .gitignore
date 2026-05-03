@@ -5,6 +5,9 @@
 # Docker build output
 /target-docker/
 
+# Release artifacts
+/dist/
+
 # Editor
 *.swp
 *.swo
