@@ -2,7 +2,9 @@
 
 mod cache;
 mod file_list;
+mod ipc;
 mod settings;
+mod video_player;
 mod viewer;
 mod wic_decoder;
 
@@ -71,6 +73,14 @@ fn main() -> eframe::Result<()> {
 
     let initial_path: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from);
 
+    if let Some(ref path) = initial_path {
+        if ipc::try_send_to_existing(path) {
+            return Ok(());
+        }
+    }
+
+    let ipc_rx = ipc::start_listener();
+
     let title = match &initial_path {
         Some(path) => {
             let name = path
@@ -102,7 +112,7 @@ fn main() -> eframe::Result<()> {
                     .clone()
                     .expect("wgpu render state required"),
             );
-            Ok(Box::new(ViewerApp::new(initial_path, render_state)))
+            Ok(Box::new(ViewerApp::new(initial_path, render_state, ipc_rx)))
         }),
     )
 }

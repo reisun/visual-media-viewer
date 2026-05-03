@@ -37,6 +37,12 @@ pub struct Settings {
     pub file_sort_key: SortKeySetting,
     #[serde(default)]
     pub file_sort_order: SortOrderSetting,
+    #[serde(default = "default_volume")]
+    pub volume: u16,
+}
+
+fn default_volume() -> u16 {
+    100
 }
 
 impl Default for Settings {
@@ -49,6 +55,7 @@ impl Default for Settings {
             group_by: GroupBySetting::Off,
             file_sort_key: SortKeySetting::Name,
             file_sort_order: SortOrderSetting::Ascending,
+            volume: 100,
         }
     }
 }

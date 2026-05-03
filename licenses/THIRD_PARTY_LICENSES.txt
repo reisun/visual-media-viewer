@@ -1,0 +1,29 @@
+Third-Party Licenses
+====================
+
+FFmpeg (LGPL 2.1)
+-----------------
+
+This software uses FFmpeg libraries licensed under the
+GNU Lesser General Public License version 2.1 (LGPL 2.1).
+
+The FFmpeg shared libraries included with this distribution are:
+  - avcodec-61.dll
+  - avdevice-61.dll
+  - avfilter-10.dll
+  - avformat-61.dll
+  - avutil-59.dll
+  - swscale-8.dll
+  - swresample-5.dll
+
+FFmpeg is a trademark of Fabrice Bellard.
+Copyright (c) 2000-2025 the FFmpeg developers.
+
+The full text of the LGPL 2.1 is provided in the file LGPL-2.1.txt.
+
+Source code for FFmpeg is available at:
+  https://github.com/FFmpeg/FFmpeg
+
+The pre-built binaries were obtained from:
+  https://github.com/BtbN/FFmpeg-Builds/releases
+  (LGPL shared build, win64)
