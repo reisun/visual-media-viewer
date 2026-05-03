@@ -218,6 +218,7 @@ impl ViewerApp {
         file_list.set_group_by(self.saved_group_by());
         file_list.re_sort(self.saved_sort_key(), self.saved_sort_order());
         if file_list.file_count() > 0 {
+            self.cache.clear();
             self.file_list = Some(file_list);
             self.load_current_image();
         }
@@ -882,7 +883,12 @@ impl eframe::App for ViewerApp {
                             let texture = ctx.load_texture(
                                 "current_image",
                                 pixels.clone(),
-                                egui::TextureOptions::LINEAR,
+                                egui::TextureOptions {
+                                    magnification: egui::TextureFilter::Linear,
+                                    minification: egui::TextureFilter::Linear,
+                                    mipmap_mode: Some(egui::TextureFilter::Linear),
+                                    ..Default::default()
+                                },
                             );
                             self.texture = Some(texture);
                         }

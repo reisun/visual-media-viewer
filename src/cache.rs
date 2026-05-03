@@ -41,6 +41,15 @@ impl ImageCache {
         }
     }
 
+    /// Clear all cached entries and pending tasks.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.lru_order.clear();
+        self.pending.clear();
+        // Drain any completed results still in the channel.
+        while self.receiver.try_recv().is_ok() {}
+    }
+
     /// Get a cached image, updating LRU order.
     pub fn get(&mut self, path: &Path) -> Option<&egui::ColorImage> {
         if self.entries.contains_key(path) {
