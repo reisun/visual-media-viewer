@@ -9,5 +9,6 @@ wgpu = "24"
 egui = "0.31"
 eframe = { version = "0.31", features = ["wgpu"] }
 image = "0.25"
+natord = "1.0"
 log = "0.4"
 env_logger = "0.11"

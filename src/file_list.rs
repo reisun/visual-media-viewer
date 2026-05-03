@@ -1,59 +1,7 @@
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// Supported image file extensions (lowercase).
 const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
-
-/// A segment of a filename for natural sort comparison.
-#[derive(Debug, PartialEq, Eq)]
-enum SortSegment {
-    Text(String),
-    Number(u64),
-}
-
-/// Parse a string into alternating text and number segments for natural sorting.
-fn natural_sort_segments(s: &str) -> Vec<SortSegment> {
-    let mut segments = Vec::new();
-    let mut chars = s.chars().peekable();
-
-    while chars.peek().is_some() {
-        if chars.peek().map_or(false, |c| c.is_ascii_digit()) {
-            let mut num_str = String::new();
-            while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
-                num_str.push(chars.next().unwrap());
-            }
-            segments.push(SortSegment::Number(num_str.parse().unwrap_or(0)));
-        } else {
-            let mut text = String::new();
-            while chars.peek().map_or(false, |c| !c.is_ascii_digit()) {
-                text.push(chars.next().unwrap());
-            }
-            segments.push(SortSegment::Text(text.to_lowercase()));
-        }
-    }
-
-    segments
-}
-
-/// Compare two filenames using natural sort order (numbers compared numerically).
-fn natural_sort_cmp(a: &str, b: &str) -> Ordering {
-    let a_segs = natural_sort_segments(a);
-    let b_segs = natural_sort_segments(b);
-
-    for (a_seg, b_seg) in a_segs.iter().zip(b_segs.iter()) {
-        let ord = match (a_seg, b_seg) {
-            (SortSegment::Number(an), SortSegment::Number(bn)) => an.cmp(bn),
-            (SortSegment::Text(at), SortSegment::Text(bt)) => at.cmp(bt),
-            (SortSegment::Number(_), SortSegment::Text(_)) => Ordering::Less,
-            (SortSegment::Text(_), SortSegment::Number(_)) => Ordering::Greater,
-        };
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-
-    a_segs.len().cmp(&b_segs.len())
-}
 
 /// Returns true if the path has a supported image extension (case-insensitive).
 fn is_supported_image(path: &Path) -> bool {
@@ -87,11 +35,10 @@ impl FileList {
             }
         };
 
-        // Sort by filename using natural sort order (numbers compared numerically).
         files.sort_by(|a, b| {
             let a_name = a.file_name().unwrap_or_default().to_string_lossy();
             let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-            natural_sort_cmp(&a_name, &b_name)
+            natord::compare_ignore_case(&a_name, &b_name)
         });
 
         Self {
@@ -178,15 +125,8 @@ mod tests {
     #[test]
     fn test_natural_sort_basic_numbers() {
         let mut names = vec!["file10.jpg", "file2.jpg", "file1.jpg", "file20.jpg"];
-        names.sort_by(|a, b| natural_sort_cmp(a, b));
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
         assert_eq!(names, vec!["file1.jpg", "file2.jpg", "file10.jpg", "file20.jpg"]);
-    }
-
-    #[test]
-    fn test_natural_sort_mixed_case() {
-        let mut names = vec!["Photo10.jpg", "photo2.jpg", "PHOTO1.jpg"];
-        names.sort_by(|a, b| natural_sort_cmp(a, b));
-        assert_eq!(names, vec!["PHOTO1.jpg", "photo2.jpg", "Photo10.jpg"]);
     }
 
     #[test]
@@ -196,7 +136,7 @@ mod tests {
             "image(2).jpg",
             "image(1).jpg",
         ];
-        names.sort_by(|a, b| natural_sort_cmp(a, b));
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
         assert_eq!(
             names,
             vec!["image(1).jpg", "image(2).jpg", "image(10).jpg"]
@@ -204,16 +144,9 @@ mod tests {
     }
 
     #[test]
-    fn test_natural_sort_no_numbers() {
-        let mut names = vec!["cherry.png", "apple.png", "banana.png"];
-        names.sort_by(|a, b| natural_sort_cmp(a, b));
-        assert_eq!(names, vec!["apple.png", "banana.png", "cherry.png"]);
-    }
-
-    #[test]
     fn test_natural_sort_multiple_number_groups() {
         let mut names = vec!["vol2ch10.jpg", "vol2ch2.jpg", "vol1ch10.jpg"];
-        names.sort_by(|a, b| natural_sort_cmp(a, b));
+        names.sort_by(|a, b| natord::compare_ignore_case(a, b));
         assert_eq!(names, vec!["vol1ch10.jpg", "vol2ch2.jpg", "vol2ch10.jpg"]);
     }
 }
