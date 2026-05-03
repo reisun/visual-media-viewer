@@ -4,6 +4,7 @@ mod cache;
 mod file_list;
 mod settings;
 mod viewer;
+mod wic_decoder;
 
 use eframe::egui;
 use std::path::PathBuf;

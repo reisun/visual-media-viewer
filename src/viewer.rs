@@ -15,6 +15,23 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     pub fn load(path: &Path) -> Result<Self, String> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        if ext == "heic" || ext == "heif" {
+            return Self::load_wic(path);
+        }
+
+        match Self::load_image_crate(path) {
+            Ok(img) => Ok(img),
+            Err(_) => Self::load_wic(path),
+        }
+    }
+
+    fn load_image_crate(path: &Path) -> Result<Self, String> {
         let file = File::open(path)
             .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
         let reader = image::ImageReader::new(BufReader::new(file))
@@ -26,6 +43,11 @@ impl DecodedImage {
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
         let pixels = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        Ok(Self { pixels })
+    }
+
+    fn load_wic(path: &Path) -> Result<Self, String> {
+        let pixels = crate::wic_decoder::decode_with_wic(path)?;
         Ok(Self { pixels })
     }
 }
@@ -645,6 +667,60 @@ impl ViewerApp {
         }
     }
 
+    fn handle_mouse_pan(&mut self, response: &egui::Response, available: egui::Vec2) {
+        if self.transform.right_drag_active || self.show_titlebar_menu {
+            return;
+        }
+        let img_size = match self.image_size {
+            Some(s) => s,
+            None => return,
+        };
+
+        let fit = self.fit_scale(available);
+        let zoom = self.transform.zoom;
+        let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
+            (img_size[1] as f32 * fit * zoom, img_size[0] as f32 * fit * zoom)
+        } else {
+            (img_size[0] as f32 * fit * zoom, img_size[1] as f32 * fit * zoom)
+        };
+
+        let overflow_x = (display_w - available.x).max(0.0);
+        let overflow_y = (display_h - available.y).max(0.0);
+        if overflow_x <= 0.0 && overflow_y <= 0.0 {
+            return;
+        }
+
+        let mouse_pos = match response.hover_pos() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let rect = response.rect;
+        let norm_x = if available.x > 0.0 {
+            ((mouse_pos.x - rect.center().x) / (available.x * 0.5)).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let norm_y = if available.y > 0.0 {
+            ((mouse_pos.y - rect.center().y) / (available.y * 0.5)).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let target_x = -norm_x * overflow_x * 0.5;
+        let target_y = -norm_y * overflow_y * 0.5;
+        let target = egui::vec2(target_x, target_y);
+
+        let dt = response.ctx.input(|i| i.stable_dt).min(0.1);
+        let speed = 8.0;
+        let t = (speed * dt).min(1.0);
+        self.transform.pan = self.transform.pan + (target - self.transform.pan) * t;
+
+        if (target - self.transform.pan).length() > 0.5 {
+            response.ctx.request_repaint();
+        }
+    }
+
     fn navigate_prev_folder(&mut self) {
         let dir = match &self.file_list {
             Some(fl) => fl.prev_image_dir(),
@@ -1207,6 +1283,7 @@ impl eframe::App for ViewerApp {
                         painter.add(egui::Shape::mesh(mesh));
 
                         self.handle_zoom_input(&response, available);
+                        self.handle_mouse_pan(&response, available);
                     }
                 } else if self.file_list.is_none() {
                     ui.centered_and_justified(|ui| {
