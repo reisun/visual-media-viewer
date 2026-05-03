@@ -95,6 +95,11 @@ MassiGraを超える高レスポンス画像・動画ビューア。Phase 1 は�
 
 ### 未着手（Phase 3 以降）
 - 動画再生（MP4 / AVI / FFmpeg連携）
-- HEIC フォーマット対応（libheif バインディング要検討）
-- マウス位置連動の画像シフト（拡大時）
+
+## Phase 3A: HEIC対応・パン改善
+
+### 機能一覧
+- [x] HEIC/HEIF フォーマット対応 — Windows WIC API経由（HEIF Image Extensions必要）
+- [x] image crateデコード失敗時のWICフォールバック
+- [x] 拡大時マウス位置連動パン — マウス位置に応じて表示領域がスムーズに追従
 
