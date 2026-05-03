@@ -285,10 +285,17 @@ impl ViewerApp {
         }
     }
 
-    /// Handle zoom interactions (right-click drag, scroll wheel, double-click).
+    /// Handle zoom interactions (right-click drag, scroll wheel, double-click)
+    /// and detect right-click short press for context menu.
     fn handle_zoom_input(&mut self, response: &egui::Response, available_size: egui::Vec2) {
         let pointer_pos = response.hover_pos().unwrap_or(response.rect.center());
         let rect_center = response.rect.center();
+
+        // Track right-click press position for context menu detection.
+        let secondary_pressed = response.ctx.input(|i| i.pointer.secondary_pressed());
+        if secondary_pressed {
+            self.right_press_pos = Some(pointer_pos);
+        }
 
         // Right-click drag: zoom by vertical movement.
         if response.secondary_clicked() {
@@ -312,6 +319,14 @@ impl ViewerApp {
                 self.transform.pan = self.transform.pan * zoom_ratio
                     + pointer_offset * (1.0 - zoom_ratio);
             } else {
+                // Right button released: check if it was a short press (no drag).
+                if let Some(press_pos) = self.right_press_pos.take() {
+                    let dist = (pointer_pos - press_pos).length();
+                    if dist < 3.0 {
+                        self.show_context_menu = true;
+                        self.context_menu_pos = pointer_pos;
+                    }
+                }
                 self.transform.right_drag_active = false;
             }
         }
@@ -538,5 +553,52 @@ impl eframe::App for ViewerApp {
                     });
                 }
             });
+
+        // Context menu (rendered as a floating area).
+        if self.show_context_menu {
+            let menu_pos = self.context_menu_pos;
+            let area_resp = egui::Area::new(egui::Id::new("context_menu"))
+                .fixed_pos(menu_pos)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(180.0);
+
+                        if ui.button("Rotate Clockwise (R)").clicked() {
+                            self.transform.rotate_cw();
+                            self.show_context_menu = false;
+                        }
+                        if ui.button("Rotate Counter-clockwise (Shift+R)").clicked() {
+                            self.transform.rotate_ccw();
+                            self.show_context_menu = false;
+                        }
+                        ui.separator();
+                        let slideshow_label = if self.slideshow_active {
+                            "Stop Slideshow (S)"
+                        } else {
+                            "Start Slideshow (S)"
+                        };
+                        if ui.button(slideshow_label).clicked() {
+                            self.slideshow_active = !self.slideshow_active;
+                            if self.slideshow_active {
+                                self.slideshow_last_advance = ctx.input(|i| i.time);
+                            }
+                            self.show_context_menu = false;
+                        }
+                        ui.separator();
+                        if ui.button("Reset View").clicked() {
+                            self.transform.reset();
+                            self.show_context_menu = false;
+                        }
+                    });
+                });
+
+            // Close menu if clicking outside it.
+            let clicked_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+                && !area_resp.response.hovered();
+            if clicked_elsewhere {
+                self.show_context_menu = false;
+            }
+        }
     }
 }
