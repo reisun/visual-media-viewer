@@ -447,7 +447,10 @@ impl VideoPlayer {
         if let Some(ref session) = self.session {
             if self.has_audio {
                 if let Some(apts) = session.audio_clock.get() {
-                    return apts;
+                    let wall = self.wall_clock();
+                    if wall - apts < 0.5 {
+                        return apts;
+                    }
                 }
             }
         }
