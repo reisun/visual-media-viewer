@@ -88,7 +88,8 @@ fn setup_file_logger() {
     let file = std::fs::File::create(&log_path).ok();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(move |buf, record| {
-            writeln!(buf, "[{} {}] {}", record.level(), record.target(), record.args())
+            let ts = buf.timestamp_millis();
+            writeln!(buf, "[{} {} {}] {}", ts, record.level(), record.target(), record.args())
         })
         .target(if file.is_some() {
             env_logger::Target::Pipe(Box::new(
