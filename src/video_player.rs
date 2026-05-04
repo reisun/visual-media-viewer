@@ -836,11 +836,10 @@ fn demuxer_audio_loop(
             }
         }
 
-        // Throttle when both audio and video are well-buffered
-        const MAX_AUDIO_AHEAD: f64 = 30.0;
+        const MAX_AUDIO_AHEAD: f64 = 5.0;
         if let Some(clock) = audio_clock.get() {
-            if last_audio_pts > clock + MAX_AUDIO_AHEAD && pending_video_bytes >= MAX_PENDING_BYTES {
-                thread::sleep(Duration::from_millis(50));
+            if last_audio_pts > clock + MAX_AUDIO_AHEAD {
+                thread::sleep(Duration::from_millis(10));
                 continue;
             }
         }
