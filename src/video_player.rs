@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next::codec::packet::traits::{Mut as PacketMut, Ref as PacketRef};
 
@@ -97,6 +97,7 @@ struct PlaybackSession {
     audio_stream: Option<cpal::Stream>,
     audio_clock: Arc<AudioClock>,
     audio_paused: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 pub struct VideoPlayer {
@@ -228,6 +229,7 @@ impl VideoPlayer {
     fn stop_session(&mut self) {
         if let Some(session) = self.session.take() {
             log::info!("[player] stop_session: sending Stop command");
+            session.stop_flag.store(true, Ordering::Release);
             let _ = session.cmd_tx.send(Command::Stop);
             drop(session.audio_stream);
             // Drop frame_rx to unblock video thread's blocking send
@@ -338,6 +340,8 @@ impl VideoPlayer {
 
         let audio_clock_for_video = Arc::clone(&audio_clock);
         let audio_clock_for_demuxer = Arc::clone(&audio_clock);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_for_video = Arc::clone(&stop_flag);
         let seek_target = position;
 
         // Unbounded channel: demuxer → video decoder (never blocks demuxer)
@@ -349,6 +353,7 @@ impl VideoPlayer {
                 video_decoder_loop(
                     video_decoder, src_w, src_h, video_time_base,
                     video_pkt_rx, frame_tx, audio_clock_for_video, seek_target,
+                    stop_flag_for_video,
                 );
             }));
             if let Err(e) = result {
@@ -367,7 +372,8 @@ impl VideoPlayer {
         let demuxer_thread = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 demuxer_audio_loop(
-                    video_idx, audio_idx, audio_time_base, audio_decoder,
+                    video_idx, video_time_base,
+                    audio_idx, audio_time_base, audio_decoder,
                     ictx, video_pkt_tx, audio_sample_tx, cmd_rx,
                     device_sample_rate, device_channels, audio_clock_for_demuxer, seek_target,
                 );
@@ -392,6 +398,7 @@ impl VideoPlayer {
             audio_stream,
             audio_clock,
             audio_paused,
+            stop_flag,
         })
     }
 
@@ -747,6 +754,7 @@ fn copy_rgba_frame(rgba_frame: &ffmpeg_next::frame::Video, buf: &mut Vec<u8>) ->
 // Uses ONLY unbounded channels — NEVER blocks.
 fn demuxer_audio_loop(
     video_idx: usize,
+    video_time_base: f64,
     audio_idx: Option<usize>,
     audio_time_base: f64,
     audio_decoder: Option<ffmpeg_next::decoder::Audio>,
@@ -817,7 +825,7 @@ fn demuxer_audio_loop(
         let stream_idx = packet.stream();
 
         if stream_idx == video_idx {
-            let (data, pts, dts) = unsafe {
+            let (data, pts_raw, dts) = unsafe {
                 let p = packet.as_ptr();
                 let data_ptr = (*p).data;
                 let data_size = (*p).size as usize;
@@ -830,7 +838,25 @@ fn demuxer_audio_loop(
                     (*p).dts,
                 )
             };
-            if video_pkt_tx.send(VideoPacketData { data, pts, dts }).is_err() {
+            // Throttle: don't read more than 5 seconds ahead of audio playback.
+            // Without this, the unbounded channel accumulates GB of compressed data.
+            let video_pts = pts_raw as f64 * video_time_base;
+            const MAX_READ_AHEAD: f64 = 5.0;
+            if let Some(clock) = audio_clock.get() {
+                while video_pts > clock + MAX_READ_AHEAD {
+                    if let Ok(Command::Stop) = cmd_rx.try_recv() {
+                        log::info!("[demuxer] stop during throttle");
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                    if let Some(c) = audio_clock.get() {
+                        if video_pts <= c + MAX_READ_AHEAD { break; }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts }).is_err() {
                 log::info!("[demuxer] video_pkt_tx disconnected, exiting");
                 break;
             }
@@ -910,6 +936,7 @@ fn video_decoder_loop(
     frame_tx: mpsc::SyncSender<VideoFrame>,
     audio_clock: Arc<AudioClock>,
     seek_target: f64,
+    stop_flag: Arc<AtomicBool>,
 ) {
     let (out_w, out_h) = fit_dimensions(src_w, src_h, 1920, 1080);
 
@@ -941,6 +968,10 @@ fn video_decoder_loop(
     log::info!("[video] start: out={}x{} seek={:.3}", out_w, out_h, seek_target);
 
     loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            log::info!("[video] stop flag set, exiting");
+            return;
+        }
         let vpd = match video_pkt_rx.recv() {
             Ok(vpd) => vpd,
             Err(_) => {
