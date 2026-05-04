@@ -18,4 +18,4 @@ ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
 RUN rustup target add x86_64-pc-windows-gnu
 
 WORKDIR /app
-CMD ["bash", "scripts/docker-build.sh"]
+CMD ["bash", "scripts/docker-build.sh", "debug"]
