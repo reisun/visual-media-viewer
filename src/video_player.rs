@@ -818,14 +818,12 @@ fn demuxer_audio_loop(
             break;
         }
 
+        let clock = audio_clock.get().unwrap_or(seek_target);
+
         // Flush pending video packets that are now within the read-ahead window
         while let Some(front) = pending_video.front() {
             let vpts = front.pts as f64 * video_time_base;
-            let can_send = match audio_clock.get() {
-                Some(clock) => vpts <= clock + MAX_READ_AHEAD,
-                None => true,
-            };
-            if can_send {
+            if vpts <= clock + MAX_READ_AHEAD {
                 let vpd = pending_video.pop_front().unwrap();
                 pending_video_bytes -= vpd.data.len();
                 if video_pkt_tx.send(vpd).is_err() {
@@ -838,12 +836,15 @@ fn demuxer_audio_loop(
             }
         }
 
+        if last_log_time.elapsed().as_secs() >= 2 {
+            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} v_pending={}({:.1}MB) last_apts={:.3} clock={:.3} read_err={}", audio_chunks_sent, video_packets_sent, pending_video.len(), pending_video_bytes as f64 / (1024.0 * 1024.0), last_audio_pts, clock, read_errors);
+            last_log_time = Instant::now();
+        }
+
         const MAX_AUDIO_AHEAD: f64 = 5.0;
-        if let Some(clock) = audio_clock.get() {
-            if last_audio_pts > clock + MAX_AUDIO_AHEAD {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
+        if last_audio_pts > clock + MAX_AUDIO_AHEAD {
+            thread::sleep(Duration::from_millis(10));
+            continue;
         }
 
         match packet.read(&mut ictx) {
@@ -879,9 +880,7 @@ fn demuxer_audio_loop(
                 )
             };
             let video_pts = pts_raw as f64 * video_time_base;
-            let should_buffer = audio_clock.get()
-                .map(|clock| video_pts > clock + MAX_READ_AHEAD)
-                .unwrap_or(false);
+            let should_buffer = video_pts > clock + MAX_READ_AHEAD;
             if should_buffer {
                 if pending_video_bytes < MAX_PENDING_BYTES {
                     pending_video_bytes += data.len();
@@ -928,11 +927,6 @@ fn demuxer_audio_loop(
             }
         }
 
-        if last_log_time.elapsed().as_secs() >= 2 {
-            let aclock = audio_clock.get().unwrap_or(-1.0);
-            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} v_pending={}({:.1}MB) last_apts={:.3} aclock={:.3} read_err={}", audio_chunks_sent, video_packets_sent, pending_video.len(), pending_video_bytes as f64 / (1024.0 * 1024.0), last_audio_pts, aclock, read_errors);
-            last_log_time = Instant::now();
-        }
     }
 
     // Flush remaining pending video packets
