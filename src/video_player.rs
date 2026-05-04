@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next::codec::packet::traits::{Mut as PacketMut, Ref as PacketRef};
 
@@ -335,7 +335,7 @@ impl VideoPlayer {
             }
         }
 
-        let (frame_tx, frame_rx) = mpsc::sync_channel(32);
+        let (frame_tx, frame_rx) = mpsc::sync_channel(4);
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
         let audio_clock_for_video = Arc::clone(&audio_clock);
@@ -402,7 +402,7 @@ impl VideoPlayer {
         })
     }
 
-    const PREBUFFER_FRAMES: usize = 64;
+    const PREBUFFER_FRAMES: usize = 8;
     const PREBUFFER_TIMEOUT_MS: u64 = 2000;
 
     fn begin_prebuffer(&mut self) {
@@ -833,6 +833,15 @@ fn demuxer_audio_loop(
                 video_packets_sent += 1;
             } else {
                 break;
+            }
+        }
+
+        // Throttle when both audio and video are well-buffered
+        const MAX_AUDIO_AHEAD: f64 = 30.0;
+        if let Some(clock) = audio_clock.get() {
+            if last_audio_pts > clock + MAX_AUDIO_AHEAD && pending_video_bytes >= MAX_PENDING_BYTES {
+                thread::sleep(Duration::from_millis(50));
+                continue;
             }
         }
 

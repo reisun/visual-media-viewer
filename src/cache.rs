@@ -11,22 +11,28 @@ struct DecodeResult {
     result: Result<egui::ColorImage, String>,
 }
 
+fn image_bytes(img: &egui::ColorImage) -> usize {
+    img.pixels.len() * 4
+}
+
 pub struct ImageCache {
     entries: HashMap<PathBuf, egui::ColorImage>,
     lru_order: VecDeque<PathBuf>,
-    max_size: usize,
+    total_bytes: usize,
+    max_bytes: usize,
     receiver: mpsc::Receiver<DecodeResult>,
     sender: mpsc::Sender<DecodeResult>,
     pending: std::collections::HashSet<PathBuf>,
 }
 
 impl ImageCache {
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_bytes: usize) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             entries: HashMap::new(),
             lru_order: VecDeque::new(),
-            max_size,
+            total_bytes: 0,
+            max_bytes,
             receiver,
             sender,
             pending: std::collections::HashSet::new(),
@@ -36,6 +42,7 @@ impl ImageCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.lru_order.clear();
+        self.total_bytes = 0;
         self.pending.clear();
         while self.receiver.try_recv().is_ok() {}
     }
@@ -51,18 +58,24 @@ impl ImageCache {
     }
 
     pub fn insert(&mut self, path: PathBuf, pixels: egui::ColorImage) {
-        if self.entries.contains_key(&path) {
+        let new_bytes = image_bytes(&pixels);
+
+        if let Some(old) = self.entries.remove(&path) {
+            self.total_bytes -= image_bytes(&old);
             self.lru_order.retain(|p| p != &path);
         }
 
-        while self.entries.len() >= self.max_size {
+        while self.total_bytes + new_bytes > self.max_bytes {
             if let Some(oldest) = self.lru_order.pop_front() {
-                self.entries.remove(&oldest);
+                if let Some(evicted) = self.entries.remove(&oldest) {
+                    self.total_bytes -= image_bytes(&evicted);
+                }
             } else {
                 break;
             }
         }
 
+        self.total_bytes += new_bytes;
         self.lru_order.push_back(path.clone());
         self.entries.insert(path.clone(), pixels);
         self.pending.remove(&path);

@@ -140,7 +140,7 @@ impl ViewerApp {
             wgpu_texture: None,
             image_size: None,
             file_list: None,
-            cache: ImageCache::new(10),
+            cache: ImageCache::new(512 * 1024 * 1024),
             transform,
             error_message: None,
             slideshow_active: false,
