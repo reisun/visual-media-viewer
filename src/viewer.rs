@@ -149,7 +149,7 @@ impl ViewerApp {
             fit_mode,
             show_titlebar_menu: false,
             titlebar_menu_pos: egui::Pos2::ZERO,
-            is_maximized: false,
+            is_maximized: settings.maximized,
             video_player: None,
             video_texture_id: None,
             video_wgpu_texture: None,
@@ -411,7 +411,7 @@ impl ViewerApp {
     /// Compute the fit-to-window scale for the current image given available size.
     /// Takes rotation into account (90/270 swaps dimensions).
     /// Returns 1.0 in OriginalSize mode.
-    fn compute_display_rect(&self, img_size: &[usize; 2], available: egui::Vec2) -> egui::Rect {
+    fn compute_display_rect(&self, img_size: &[usize; 2], available: egui::Vec2, center: egui::Pos2) -> egui::Rect {
         let fit = self.fit_scale(available);
         let (display_w, display_h) = if self.transform.is_rotated_90_or_270() {
             (
@@ -425,7 +425,7 @@ impl ViewerApp {
             )
         };
         egui::Rect::from_center_size(
-            egui::Pos2::new(available.x / 2.0, available.y / 2.0) + self.transform.pan,
+            center + self.transform.pan,
             egui::vec2(display_w, display_h),
         )
     }
@@ -574,6 +574,8 @@ impl ViewerApp {
                 if bar_response.double_clicked() {
                     self.is_maximized = !self.is_maximized;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
+                    self.settings.maximized = self.is_maximized;
+                    self.settings.save();
                 }
 
                 if bar_response.secondary_clicked() {
@@ -650,6 +652,7 @@ impl ViewerApp {
         }
 
         let menu_pos = self.titlebar_menu_pos;
+        let max_menu_height = ctx.screen_rect().height() - menu_pos.y - 20.0;
         let menu_response = egui::Window::new("titlebar_context_menu")
             .title_bar(false)
             .fixed_pos(menu_pos)
@@ -657,6 +660,9 @@ impl ViewerApp {
             .resizable(false)
             .default_width(220.0)
             .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(max_menu_height.max(200.0))
+                .show(ui, |ui| {
                 ui.label(egui::RichText::new("リスト").strong().size(13.0));
                 ui.separator();
 
@@ -775,6 +781,22 @@ impl ViewerApp {
                     }
                 });
 
+                ui.separator();
+
+                ui.label(egui::RichText::new("音声同期").size(12.0));
+                ui.horizontal(|ui| {
+                    ui.label("オフセット:");
+                    let mut offset = self.settings.audio_offset_ms;
+                    let drag = egui::DragValue::new(&mut offset)
+                        .range(-200..=200)
+                        .speed(5)
+                        .suffix("ms");
+                    if ui.add(drag).changed() {
+                        self.settings.audio_offset_ms = offset;
+                        self.save_settings();
+                    }
+                });
+
                 ui.add_space(8.0);
 
                 ui.label(egui::RichText::new("表示").strong().size(13.0));
@@ -823,6 +845,7 @@ impl ViewerApp {
                     }
                 }
             });
+            });
 
         if let Some(inner) = menu_response {
             if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
@@ -837,6 +860,22 @@ impl ViewerApp {
 }
 
 impl ViewerApp {
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        if self.is_maximized {
+            return;
+        }
+        let rect = ctx.screen_rect();
+        let w = rect.width();
+        let h = rect.height();
+        if (w - self.settings.window_width).abs() > 1.0
+            || (h - self.settings.window_height).abs() > 1.0
+        {
+            self.settings.window_width = w;
+            self.settings.window_height = h;
+            self.settings.save();
+        }
+    }
+
     fn handle_window_resize(&self, ctx: &egui::Context) {
         if self.is_maximized {
             return;
@@ -915,6 +954,7 @@ impl eframe::App for ViewerApp {
             }
         }
 
+        self.track_window_size(ctx);
         self.handle_window_resize(ctx);
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -1019,6 +1059,10 @@ impl eframe::App for ViewerApp {
                     player.toggle_pause();
                 }
             }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::D)) {
+                self.dump_diagnostics();
+            }
         }
 
         if self.slideshow_active {
@@ -1070,7 +1114,8 @@ impl eframe::App for ViewerApp {
                     }
 
                     if let (Some(tex_id), Some(img_size)) = (self.texture_id, &self.image_size) {
-                        let image_rect = self.compute_display_rect(img_size, available);
+                        let center = ui.available_rect_before_wrap().center();
+                        let image_rect = self.compute_display_rect(img_size, available, center);
 
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
@@ -1091,14 +1136,51 @@ impl eframe::App for ViewerApp {
 }
 
 impl ViewerApp {
+    fn dump_diagnostics(&self) {
+        let diag_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("diagnostics.txt")))
+            .unwrap_or_else(|| std::path::PathBuf::from("diagnostics.txt"));
+        let mut info = String::new();
+        if let Some(ref fl) = self.file_list {
+            if let Some(path) = fl.current_path() {
+                info.push_str(&format!("File: {}\n", path.display()));
+            }
+        }
+        if let Some(ref player) = self.video_player {
+            info.push_str(&player.diag_info);
+            info.push_str(&format!("\nState: {:?}", match player.state {
+                crate::video_player::PlaybackState::Playing => "Playing",
+                crate::video_player::PlaybackState::Paused => "Paused",
+                crate::video_player::PlaybackState::Finished => "Finished",
+            }));
+            info.push_str(&format!("\nPTS: {:.3}", player.current_pts()));
+            info.push_str(&format!("\nDuration: {:.3}", player.duration));
+        } else {
+            info.push_str("No video player active\n");
+        }
+        let _ = std::fs::write(&diag_path, &info);
+    }
+
     fn render_video_frame(&mut self, ui: &mut egui::Ui, available: egui::Vec2) {
+        let is_buffering = self.video_player.as_ref().is_some_and(|p| p.is_buffering());
+
+        let av_offset = self.settings.audio_offset_ms as f64 / 1000.0;
         let new_frame = self.video_player.as_mut().and_then(|p| {
-            let f = p.poll_frame()?;
+            let f = p.poll_frame(av_offset)?;
             Some((f.rgba.clone(), f.width, f.height))
         });
 
         if let Some((rgba, width, height)) = new_frame {
             self.upload_video_frame(&rgba, width, height);
+        }
+
+        if is_buffering {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+            });
+            ui.ctx().request_repaint();
+            return;
         }
 
         let tex_id = match self.video_texture_id {
@@ -1110,7 +1192,8 @@ impl ViewerApp {
             None => return,
         };
 
-        let image_rect = self.compute_display_rect(&img_size, available);
+        let center = ui.available_rect_before_wrap().center();
+        let image_rect = self.compute_display_rect(&img_size, available, center);
 
         let (response, painter) =
             ui.allocate_painter(available, egui::Sense::click_and_drag());

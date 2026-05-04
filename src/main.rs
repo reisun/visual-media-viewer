@@ -57,6 +57,17 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+fn load_app_icon() -> Option<egui::IconData> {
+    let png_bytes = include_bytes!("../assets/icon.png");
+    let img = image::load_from_memory(png_bytes).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width: w,
+        height: h,
+    })
+}
+
 fn setup_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{}\n\n{:?}", info, std::backtrace::Backtrace::force_capture());
@@ -68,9 +79,34 @@ fn setup_panic_hook() {
     }));
 }
 
+fn setup_file_logger() {
+    use std::io::Write;
+    let log_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("debug.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("debug.log"));
+    let file = std::fs::File::create(&log_path).ok();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(move |buf, record| {
+            writeln!(buf, "[{} {}] {}", record.level(), record.target(), record.args())
+        })
+        .target(if file.is_some() {
+            env_logger::Target::Pipe(Box::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .unwrap(),
+            ))
+        } else {
+            env_logger::Target::Stderr
+        })
+        .init();
+}
+
 fn main() -> eframe::Result<()> {
     setup_panic_hook();
-    env_logger::init();
+    setup_file_logger();
 
     let initial_path: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from);
 
@@ -93,12 +129,21 @@ fn main() -> eframe::Result<()> {
         None => "Visual Media Viewer".to_string(),
     };
 
+    let icon = load_app_icon();
+    let saved_settings = settings::Settings::load();
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([saved_settings.window_width, saved_settings.window_height])
+        .with_maximized(saved_settings.maximized)
+        .with_title(&title)
+        .with_drag_and_drop(true)
+        .with_decorations(false);
+    if let Some(icon_data) = icon {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon_data));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_title(&title)
-            .with_drag_and_drop(true)
-            .with_decorations(false),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

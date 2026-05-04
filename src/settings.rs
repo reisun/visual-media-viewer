@@ -39,10 +39,30 @@ pub struct Settings {
     pub file_sort_order: SortOrderSetting,
     #[serde(default = "default_volume")]
     pub volume: u16,
+    #[serde(default = "default_audio_offset_ms")]
+    pub audio_offset_ms: i32,
+    #[serde(default = "default_window_width")]
+    pub window_width: f32,
+    #[serde(default = "default_window_height")]
+    pub window_height: f32,
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 fn default_volume() -> u16 {
     100
+}
+
+fn default_audio_offset_ms() -> i32 {
+    60
+}
+
+fn default_window_width() -> f32 {
+    1280.0
+}
+
+fn default_window_height() -> f32 {
+    720.0
 }
 
 impl Default for Settings {
@@ -56,6 +76,10 @@ impl Default for Settings {
             file_sort_key: SortKeySetting::Name,
             file_sort_order: SortOrderSetting::Ascending,
             volume: 100,
+            audio_offset_ms: 60,
+            window_width: 1280.0,
+            window_height: 720.0,
+            maximized: false,
         }
     }
 }
