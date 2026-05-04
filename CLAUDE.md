@@ -7,8 +7,11 @@ High-performance image and media viewer built with Rust + wgpu + egui. Targeting
 - **Language:** Rust
 - **GPU Rendering:** wgpu
 - **GUI Framework:** egui + eframe (wgpu backend)
-- **Image Decoding:** image crate (JPEG, PNG, GIF, BMP, WebP, TIFF)
-- **Background Decoding:** std::thread + std::sync::mpsc (preloading)
+- **Image Decoding:** image crate (JPEG, PNG, GIF, BMP, WebP, TIFF) + Windows WIC (HEIC/HEIF)
+- **Video:** FFmpeg (LGPL DLL dynamic link) — decode, audio resample
+- **Audio:** cpal crate — platform audio output
+- **Background Decoding:** std::thread + std::sync::mpsc (preloading, video decode)
+- **IPC:** TCP localhost (multi-instance prevention)
 - **Logging:** log + env_logger
 
 ## Build
@@ -26,30 +29,38 @@ Output: `target-docker/x86_64-pc-windows-gnu/release/visual-media-viewer.exe`
 ```
 visual-media-viewer/
   src/
-    main.rs          # Application entry point, CLI arg parsing, eframe setup
-    viewer.rs        # ViewerApp: image display, zoom/pan, keyboard input
+    main.rs          # Entry point, CLI arg parsing, eframe setup, font config
+    viewer.rs        # ViewerApp: image/video display, zoom/pan, keyboard, UI
     file_list.rs     # FileList: directory scan, sorted navigation, extension filter
-    cache.rs         # ImageCache: LRU cache with background preload (std::thread)
+    cache.rs         # ImageCache: byte-based LRU cache (512MB) with background preload
+    video_player.rs  # VideoPlayer: FFmpeg decode, audio sync, 2-thread architecture
+    image_decode.rs  # DecodedImage: decode, mipmap, texture upload
+    ipc.rs           # IPC: TCP listener/sender for multi-instance prevention
+    settings.rs      # Settings: window size, volume, persistent JSON config
+    wic_decoder.rs   # Windows WIC fallback decoder (HEIC/HEIF)
   scripts/
     build.sh         # Build script (wraps docker compose)
+  assets/
+    icon.png         # Application icon
   Cargo.toml         # Rust dependencies
-  Dockerfile.build   # Cross-compilation image (rust + mingw-w64)
+  Dockerfile.build   # Cross-compilation image (rust + mingw-w64 + FFmpeg)
   docker-compose.yml # Build service definition
   TASK.md            # Project roadmap and task tracking
   CLAUDE.md          # This file
 ```
 
 ## Keyboard Shortcuts
-- **Arrow Left/Right:** Navigate previous/next image (loops)
+- **Arrow Left/Right:** Navigate previous/next file (loops) / Video: seek ±10s
 - **Arrow Up/Down:** Navigate to previous/next sibling folder
 - **PgUp:** Navigate to parent directory
 - **PgDn:** Navigate into first child subdirectory with images
+- **Space:** Play/pause video
 - **R:** Rotate clockwise 90 degrees
 - **Shift+R:** Rotate counter-clockwise 90 degrees
 - **S:** Toggle slideshow
 - **+/=:** Increase slideshow interval (+0.1s, max 30s)
 - **-:** Decrease slideshow interval (-0.1s, min 1s)
-- **Mouse wheel:** Zoom in/out
+- **Mouse wheel:** Zoom in/out (image) / Volume adjust (video)
 - **Right-click drag:** Zoom by vertical movement
 - **Double-click:** Reset view to fit
 
