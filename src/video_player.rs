@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -312,7 +312,7 @@ impl VideoPlayer {
 
         let mut device_sample_rate: u32 = 48000;
         let mut device_channels: u16 = 2;
-        let mut audio_sample_tx: Option<mpsc::SyncSender<AudioChunk>> = None;
+        let mut audio_sample_tx: Option<mpsc::Sender<AudioChunk>> = None;
         let mut audio_stream: Option<cpal::Stream> = None;
 
         if audio_decoder.is_some() {
@@ -323,10 +323,11 @@ impl VideoPlayer {
         }
 
         let audio_clock = Arc::new(AudioClock::new(device_channels, device_sample_rate));
+        let buffered_bytes = Arc::new(AtomicUsize::new(0));
 
         if audio_decoder.is_some() {
             if let Ok((device, config, _sr, ch)) = get_audio_device_info() {
-                match setup_audio_output(&device, config, volume_clone, Arc::clone(&audio_paused), Arc::clone(&audio_clock), ch) {
+                match setup_audio_output(&device, config, volume_clone, Arc::clone(&audio_paused), Arc::clone(&audio_clock), ch, Arc::clone(&buffered_bytes)) {
                     Ok((tx, stream)) => {
                         audio_sample_tx = Some(tx);
                         audio_stream = Some(stream);
@@ -344,9 +345,11 @@ impl VideoPlayer {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_for_video = Arc::clone(&stop_flag);
         let stop_flag_for_demuxer = Arc::clone(&stop_flag);
+        let buffered_bytes_for_video = Arc::clone(&buffered_bytes);
+        let buffered_bytes_for_demuxer = Arc::clone(&buffered_bytes);
         let seek_target = position;
 
-        let (video_pkt_tx, video_pkt_rx) = mpsc::sync_channel::<VideoPacketData>(150);
+        let (video_pkt_tx, video_pkt_rx) = mpsc::channel::<VideoPacketData>();
 
         // Thread 2: Video decoder (blocks on frame_tx.send — does NOT affect audio)
         let video_thread = thread::spawn(move || {
@@ -354,7 +357,7 @@ impl VideoPlayer {
                 video_decoder_loop(
                     video_decoder, src_w, src_h, video_time_base,
                     video_pkt_rx, frame_tx, audio_clock_for_video, seek_target,
-                    stop_flag_for_video,
+                    stop_flag_for_video, buffered_bytes_for_video,
                 );
             }));
             if let Err(e) = result {
@@ -376,7 +379,7 @@ impl VideoPlayer {
                     audio_idx, audio_time_base, audio_decoder,
                     ictx, video_pkt_tx, audio_sample_tx, cmd_rx,
                     device_sample_rate, device_channels, audio_clock_for_demuxer, seek_target,
-                    stop_flag_for_demuxer,
+                    stop_flag_for_demuxer, buffered_bytes_for_demuxer,
                 );
             }));
             if let Err(e) = result {
@@ -635,18 +638,19 @@ fn setup_audio_output(
     paused: Arc<AtomicBool>,
     audio_clock: Arc<AudioClock>,
     channels: u16,
-) -> Result<(mpsc::SyncSender<AudioChunk>, cpal::Stream), String> {
-    let (tx, rx) = mpsc::sync_channel::<AudioChunk>(256);
+    buffered_bytes: Arc<AtomicUsize>,
+) -> Result<(mpsc::Sender<AudioChunk>, cpal::Stream), String> {
+    let (tx, rx) = mpsc::channel::<AudioChunk>();
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
-            build_audio_stream::<f32>(device, &config.into(), rx, volume, paused, audio_clock, channels)?
+            build_audio_stream::<f32>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
         }
         cpal::SampleFormat::I16 => {
-            build_audio_stream::<i16>(device, &config.into(), rx, volume, paused, audio_clock, channels)?
+            build_audio_stream::<i16>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
         }
         cpal::SampleFormat::U16 => {
-            build_audio_stream::<u16>(device, &config.into(), rx, volume, paused, audio_clock, channels)?
+            build_audio_stream::<u16>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
         }
         _ => return Err("Unsupported audio sample format".to_string()),
     };
@@ -662,6 +666,7 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     paused: Arc<AtomicBool>,
     audio_clock: Arc<AudioClock>,
     channels: u16,
+    buffered_bytes: Arc<AtomicUsize>,
 ) -> Result<cpal::Stream, String> {
     let mut buffer: Vec<f32> = Vec::new();
     let mut buf_pos: usize = 0;
@@ -695,6 +700,7 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     if buf_pos >= buffer.len() {
                         match rx.try_recv() {
                             Ok(chunk) => {
+                                buffered_bytes.fetch_sub(chunk.samples.len() * 4, Ordering::Relaxed);
                                 if !base_set {
                                     audio_clock.set_base(chunk.pts);
                                     base_set = true;
@@ -761,7 +767,8 @@ fn copy_rgba_frame(rgba_frame: &ffmpeg_next::frame::Video, buf: &mut Vec<u8>) ->
 
 // --- Thread 1: Demuxer + Audio Decoder ---
 // Reads packets from container, decodes audio inline, forwards video packets.
-// Bounded channels provide backpressure — blocks when downstream is full.
+// Unbounded channels — individual sends NEVER block (ffplay pattern).
+// Global byte counter + throttle prevents unbounded memory growth.
 fn demuxer_audio_loop(
     video_idx: usize,
     _video_time_base: f64,
@@ -769,14 +776,15 @@ fn demuxer_audio_loop(
     audio_time_base: f64,
     audio_decoder: Option<ffmpeg_next::decoder::Audio>,
     mut ictx: ffmpeg_next::format::context::Input,
-    video_pkt_tx: mpsc::SyncSender<VideoPacketData>,
-    audio_tx: Option<mpsc::SyncSender<AudioChunk>>,
+    video_pkt_tx: mpsc::Sender<VideoPacketData>,
+    audio_tx: Option<mpsc::Sender<AudioChunk>>,
     cmd_rx: mpsc::Receiver<Command>,
     device_sample_rate: u32,
     device_channels: u16,
     audio_clock: Arc<AudioClock>,
     seek_target: f64,
     stop_flag: Arc<AtomicBool>,
+    buffered_bytes: Arc<AtomicUsize>,
 ) {
     let mut audio_decoder = audio_decoder;
     let mut resampler: Option<ffmpeg_next::software::resampling::Context> = None;
@@ -809,6 +817,8 @@ fn demuxer_audio_loop(
     let mut last_log_time = Instant::now();
     let mut read_errors: u64 = 0;
 
+    const MAX_BUFFERED_BYTES: usize = 50 * 1024 * 1024;
+
     log::info!("[demuxer] start: video_idx={} audio_idx={:?} seek={:.3}", video_idx, audio_idx, seek_target);
 
     let mut packet = ffmpeg_next::Packet::empty();
@@ -822,9 +832,16 @@ fn demuxer_audio_loop(
             break;
         }
 
+        while buffered_bytes.load(Ordering::Relaxed) > MAX_BUFFERED_BYTES {
+            if stop_flag.load(Ordering::Relaxed) { return; }
+            if let Ok(Command::Stop) = cmd_rx.try_recv() { return; }
+            thread::sleep(Duration::from_millis(10));
+        }
+
         if last_log_time.elapsed().as_secs() >= 2 {
             let clock = audio_clock.get().unwrap_or(seek_target);
-            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} last_apts={:.3} clock={:.3} read_err={}", audio_chunks_sent, video_packets_sent, last_audio_pts, clock, read_errors);
+            let buf_mb = buffered_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
+            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} last_apts={:.3} clock={:.3} buf={:.1}MB read_err={}", audio_chunks_sent, video_packets_sent, last_audio_pts, clock, buf_mb, read_errors);
             last_log_time = Instant::now();
         }
 
@@ -860,21 +877,13 @@ fn demuxer_audio_loop(
                     (*p).flags,
                 )
             };
-            let mut vpd = VideoPacketData { data, pts: pts_raw, dts, flags };
-            loop {
-                if stop_flag.load(Ordering::Relaxed) { return; }
-                match video_pkt_tx.try_send(vpd) {
-                    Ok(()) => { video_packets_sent += 1; break; }
-                    Err(mpsc::TrySendError::Full(returned)) => {
-                        vpd = returned;
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        log::info!("[demuxer] video_pkt_tx disconnected, exiting");
-                        return;
-                    }
-                }
+            let vpd_bytes = data.len();
+            buffered_bytes.fetch_add(vpd_bytes, Ordering::Relaxed);
+            if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts, flags }).is_err() {
+                log::info!("[demuxer] video_pkt_tx disconnected, exiting");
+                return;
             }
+            video_packets_sent += 1;
         } else if Some(stream_idx) == audio_idx {
             if let Some(ref mut adec) = audio_decoder {
                 if adec.send_packet(&packet).is_err() { continue; }
@@ -895,25 +904,14 @@ fn demuxer_audio_loop(
                             let samples = extract_f32_samples(&resampled, resampled_channels);
                             if !samples.is_empty() {
                                 let adapted = adapt_channels(&samples, resampled_channels, device_channels);
-                                let mut chunk = AudioChunk { samples: adapted, pts: apts };
-                                loop {
-                                    if stop_flag.load(Ordering::Relaxed) { return; }
-                                    match atx.try_send(chunk) {
-                                        Ok(()) => {
-                                            audio_chunks_sent += 1;
-                                            last_audio_pts = apts;
-                                            break;
-                                        }
-                                        Err(mpsc::TrySendError::Full(returned)) => {
-                                            chunk = returned;
-                                            thread::sleep(Duration::from_millis(5));
-                                        }
-                                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                                            log::error!("[demuxer] audio_tx disconnected at apts={:.3}", apts);
-                                            return;
-                                        }
-                                    }
+                                let chunk_bytes = adapted.len() * 4;
+                                buffered_bytes.fetch_add(chunk_bytes, Ordering::Relaxed);
+                                if atx.send(AudioChunk { samples: adapted, pts: apts }).is_err() {
+                                    log::error!("[demuxer] audio_tx disconnected at apts={:.3}", apts);
+                                    return;
                                 }
+                                audio_chunks_sent += 1;
+                                last_audio_pts = apts;
                             }
                         }
                     }
@@ -933,7 +931,7 @@ fn demuxer_audio_loop(
                     if !samples.is_empty() {
                         let adapted = adapt_channels(&samples, resampled_channels, device_channels);
                         let apts = last_audio_pts;
-                        let _ = atx.try_send(AudioChunk { samples: adapted, pts: apts });
+                        let _ = atx.send(AudioChunk { samples: adapted, pts: apts });
                     }
                 }
             }
@@ -956,6 +954,7 @@ fn video_decoder_loop(
     audio_clock: Arc<AudioClock>,
     seek_target: f64,
     stop_flag: Arc<AtomicBool>,
+    buffered_bytes: Arc<AtomicUsize>,
 ) {
     let (out_w, out_h) = fit_dimensions(src_w, src_h, 1920, 1080);
 
@@ -999,6 +998,7 @@ fn video_decoder_loop(
                 break;
             }
         };
+        buffered_bytes.fetch_sub(vpd.data.len(), Ordering::Relaxed);
         packets_received += 1;
         if packets_received == 1 {
             log::info!("[video] first packet received: size={} pts={} dts={} flags={}", vpd.data.len(), vpd.pts, vpd.dts, vpd.flags);
