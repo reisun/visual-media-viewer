@@ -38,6 +38,7 @@ FFmpeg LGPL DLLリンク、動画フォーマット対応（MP4/WebM/MKV/AVI/MOV
 - メモリ使用量改善（画像キャッシュ: バイトベース512MB / 動画: sync_channel(4), prebuffer(8), 音声スロットル5秒上限）— PR #14, #15
 - 音量カーブ改善（リニア→二乗）、IPC時ウインドウフォーカス修正、動画再生診断ログ追加 — PR #16
 - bounded channelバックプレッシャー（unbounded channel + clock sleepスロットル → sync_channel自然フロー制御）— PR #19
+- 音声クロック停止時のwall clockフォールバック（VLC/ffplay/mpvパターン準拠）— PR #20
 
 ## 課題（対応中）
 
