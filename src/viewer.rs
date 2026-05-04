@@ -942,16 +942,6 @@ impl eframe::App for ViewerApp {
         if let Ok(path) = self.ipc_rx.try_recv() {
             self.open_file(&path);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::UI::WindowsAndMessaging::*;
-                unsafe {
-                    let fg = GetForegroundWindow();
-                    if !fg.is_invalid() {
-                        let _ = SetForegroundWindow(fg);
-                    }
-                }
-            }
         }
 
         self.track_window_size(ctx);
