@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ffmpeg_next::codec::packet::traits::{Mut as PacketMut, Ref as PacketRef};
 
@@ -697,7 +697,12 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                                 buffer = chunk.samples;
                                 buf_pos = 0;
                             }
-                            Err(_) => {
+                            Err(mpsc::TryRecvError::Empty) => {
+                                *sample = T::from_sample(0.0f32);
+                                continue;
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                audio_clock.active.store(false, Ordering::Release);
                                 *sample = T::from_sample(0.0f32);
                                 continue;
                             }
@@ -801,10 +806,34 @@ fn demuxer_audio_loop(
     log::info!("[demuxer] start: video_idx={} audio_idx={:?} seek={:.3}", video_idx, audio_idx, seek_target);
 
     let mut packet = ffmpeg_next::Packet::empty();
+    let mut pending_video: std::collections::VecDeque<VideoPacketData> = std::collections::VecDeque::new();
+    let mut pending_video_bytes: usize = 0;
+    const MAX_READ_AHEAD: f64 = 5.0;
+    const MAX_PENDING_BYTES: usize = 50 * 1024 * 1024;
     loop {
         if let Ok(Command::Stop) = cmd_rx.try_recv() {
             log::info!("[demuxer] stop command received");
             break;
+        }
+
+        // Flush pending video packets that are now within the read-ahead window
+        while let Some(front) = pending_video.front() {
+            let vpts = front.pts as f64 * video_time_base;
+            let can_send = match audio_clock.get() {
+                Some(clock) => vpts <= clock + MAX_READ_AHEAD,
+                None => true,
+            };
+            if can_send {
+                let vpd = pending_video.pop_front().unwrap();
+                pending_video_bytes -= vpd.data.len();
+                if video_pkt_tx.send(vpd).is_err() {
+                    log::info!("[demuxer] video_pkt_tx disconnected (pending flush)");
+                    return;
+                }
+                video_packets_sent += 1;
+            } else {
+                break;
+            }
         }
 
         match packet.read(&mut ictx) {
@@ -838,29 +867,22 @@ fn demuxer_audio_loop(
                     (*p).dts,
                 )
             };
-            // Throttle: don't read more than 5 seconds ahead of audio playback.
-            // Without this, the unbounded channel accumulates GB of compressed data.
             let video_pts = pts_raw as f64 * video_time_base;
-            const MAX_READ_AHEAD: f64 = 5.0;
-            if let Some(clock) = audio_clock.get() {
-                while video_pts > clock + MAX_READ_AHEAD {
-                    if let Ok(Command::Stop) = cmd_rx.try_recv() {
-                        log::info!("[demuxer] stop during throttle");
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                    if let Some(c) = audio_clock.get() {
-                        if video_pts <= c + MAX_READ_AHEAD { break; }
-                    } else {
-                        break;
-                    }
+            let should_buffer = audio_clock.get()
+                .map(|clock| video_pts > clock + MAX_READ_AHEAD)
+                .unwrap_or(false);
+            if should_buffer {
+                if pending_video_bytes < MAX_PENDING_BYTES {
+                    pending_video_bytes += data.len();
+                    pending_video.push_back(VideoPacketData { data, pts: pts_raw, dts });
                 }
+            } else {
+                if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts }).is_err() {
+                    log::info!("[demuxer] video_pkt_tx disconnected, exiting");
+                    break;
+                }
+                video_packets_sent += 1;
             }
-            if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts }).is_err() {
-                log::info!("[demuxer] video_pkt_tx disconnected, exiting");
-                break;
-            }
-            video_packets_sent += 1;
         } else if Some(stream_idx) == audio_idx {
             if let Some(ref mut adec) = audio_decoder {
                 if adec.send_packet(&packet).is_err() { continue; }
@@ -897,9 +919,15 @@ fn demuxer_audio_loop(
 
         if last_log_time.elapsed().as_secs() >= 2 {
             let aclock = audio_clock.get().unwrap_or(-1.0);
-            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} last_apts={:.3} aclock={:.3} read_err={}", audio_chunks_sent, video_packets_sent, last_audio_pts, aclock, read_errors);
+            log::info!("[demuxer] stats: a_sent={} v_pkt_sent={} v_pending={}({:.1}MB) last_apts={:.3} aclock={:.3} read_err={}", audio_chunks_sent, video_packets_sent, pending_video.len(), pending_video_bytes as f64 / (1024.0 * 1024.0), last_audio_pts, aclock, read_errors);
             last_log_time = Instant::now();
         }
+    }
+
+    // Flush remaining pending video packets
+    for vpd in pending_video {
+        if video_pkt_tx.send(vpd).is_err() { break; }
+        video_packets_sent += 1;
     }
 
     // Flush audio decoder
