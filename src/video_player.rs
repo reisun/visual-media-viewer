@@ -86,6 +86,7 @@ struct VideoPacketData {
     data: Vec<u8>,
     pts: i64,
     dts: i64,
+    flags: i32,
 }
 
 /// Active playback session (destroyed and recreated on each play_from)
@@ -684,7 +685,8 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     return;
                 }
 
-                let vol = volume.load(Ordering::Relaxed) as f32 / 100.0;
+                let linear = volume.load(Ordering::Relaxed) as f32 / 100.0;
+                let vol = linear * linear;
 
                 for sample in data.iter_mut() {
                     if buf_pos >= buffer.len() {
@@ -862,7 +864,7 @@ fn demuxer_audio_loop(
         let stream_idx = packet.stream();
 
         if stream_idx == video_idx {
-            let (data, pts_raw, dts) = unsafe {
+            let (data, pts_raw, dts, flags) = unsafe {
                 let p = packet.as_ptr();
                 let data_ptr = (*p).data;
                 let data_size = (*p).size as usize;
@@ -873,6 +875,7 @@ fn demuxer_audio_loop(
                     std::slice::from_raw_parts(data_ptr, data_size).to_vec(),
                     (*p).pts,
                     (*p).dts,
+                    (*p).flags,
                 )
             };
             let video_pts = pts_raw as f64 * video_time_base;
@@ -882,10 +885,10 @@ fn demuxer_audio_loop(
             if should_buffer {
                 if pending_video_bytes < MAX_PENDING_BYTES {
                     pending_video_bytes += data.len();
-                    pending_video.push_back(VideoPacketData { data, pts: pts_raw, dts });
+                    pending_video.push_back(VideoPacketData { data, pts: pts_raw, dts, flags });
                 }
             } else {
-                if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts }).is_err() {
+                if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts, flags }).is_err() {
                     log::info!("[demuxer] video_pkt_tx disconnected, exiting");
                     break;
                 }
@@ -1000,8 +1003,9 @@ fn video_decoder_loop(
     let mut video_started = false;
     let mut last_video_pts: f64 = 0.0;
     let mut last_log_time = Instant::now();
+    let mut packets_received: u64 = 0;
 
-    log::info!("[video] start: out={}x{} seek={:.3}", out_w, out_h, seek_target);
+    log::info!("[video] start: out={}x{} fmt={:?} seek={:.3}", out_w, out_h, video_decoder.format(), seek_target);
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -1011,10 +1015,14 @@ fn video_decoder_loop(
         let vpd = match video_pkt_rx.recv() {
             Ok(vpd) => vpd,
             Err(_) => {
-                log::info!("[video] video_pkt_rx disconnected (EOF from demuxer)");
+                log::info!("[video] video_pkt_rx disconnected (EOF from demuxer), pkts_recv={} frames_sent={}", packets_received, video_frames_sent);
                 break;
             }
         };
+        packets_received += 1;
+        if packets_received == 1 {
+            log::info!("[video] first packet received: size={} pts={} dts={} flags={}", vpd.data.len(), vpd.pts, vpd.dts, vpd.flags);
+        }
 
         // Reconstruct packet from transferred data
         let mut pkt = ffmpeg_next::Packet::empty();
@@ -1024,8 +1032,14 @@ fn video_decoder_loop(
             std::ptr::copy_nonoverlapping(vpd.data.as_ptr(), (*ptr).data, vpd.data.len());
             (*ptr).pts = vpd.pts;
             (*ptr).dts = vpd.dts;
+            (*ptr).flags = vpd.flags;
         }
-        if video_decoder.send_packet(&pkt).is_err() { continue; }
+        if let Err(e) = video_decoder.send_packet(&pkt) {
+            if !video_started {
+                log::warn!("[video] send_packet failed (pts={}): {}", vpd.pts, e);
+            }
+            continue;
+        }
 
         while video_decoder.receive_frame(&mut decoded_frame).is_ok() {
             let raw_pts = unsafe { (*decoded_frame.as_ptr()).best_effort_timestamp };
@@ -1065,7 +1079,7 @@ fn video_decoder_loop(
         }
 
         if last_log_time.elapsed().as_secs() >= 2 {
-            log::info!("[video] stats: v_sent={} v_drop={} last_vpts={:.3}", video_frames_sent, video_frames_dropped, last_video_pts);
+            log::info!("[video] stats: pkts={} v_sent={} v_drop={} last_vpts={:.3}", packets_received, video_frames_sent, video_frames_dropped, last_video_pts);
             last_log_time = Instant::now();
         }
     }
