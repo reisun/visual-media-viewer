@@ -85,6 +85,9 @@ impl ImageCache {
 
     pub fn preload(&mut self, paths: Vec<PathBuf>) {
         for path in paths {
+            if self.total_bytes >= self.max_bytes {
+                break;
+            }
             if self.entries.contains_key(&path) || self.pending.contains(&path) {
                 continue;
             }
