@@ -49,6 +49,12 @@ Docker ベースのクロスコンパイル（Linux → Windows x86_64）:
 - Docker / Docker Compose
 - WSL2（推奨）
 
+## 既知の課題
+
+- 一部の動画が再生されない場合がある（診断ログ対応済み、原因調査中）
+- GIFアニメーション未対応（静止画として表示）
+- 動画のループ再生未対応
+
 ## ライセンス
 
 MIT License - 詳細は [LICENSE](LICENSE) を参照。
