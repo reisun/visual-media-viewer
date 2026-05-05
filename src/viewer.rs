@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -97,9 +98,13 @@ impl ViewTransform {
     }
 }
 
+struct TextureEntry {
+    texture_id: egui::TextureId,
+    _wgpu_texture: wgpu::Texture,
+    size: [usize; 2],
+}
+
 pub struct ViewerApp {
-    texture_id: Option<egui::TextureId>,
-    wgpu_texture: Option<wgpu::Texture>,
     image_size: Option<[usize; 2]>,
     file_list: Option<FileList>,
     cache: ImageCache,
@@ -119,6 +124,7 @@ pub struct ViewerApp {
     settings: Settings,
     render_state: Arc<eframe::egui_wgpu::RenderState>,
     ipc_rx: mpsc::Receiver<PathBuf>,
+    texture_cache: HashMap<PathBuf, TextureEntry>,
 }
 
 impl ViewerApp {
@@ -136,8 +142,6 @@ impl ViewerApp {
         };
 
         let mut app = Self {
-            texture_id: None,
-            wgpu_texture: None,
             image_size: None,
             file_list: None,
             cache: ImageCache::new(512 * 1024 * 1024, render_state.device.limits().max_texture_dimension_2d),
@@ -157,6 +161,7 @@ impl ViewerApp {
             settings,
             render_state,
             ipc_rx,
+            texture_cache: HashMap::new(),
         };
 
         if let Some(path) = initial_path {
@@ -166,13 +171,47 @@ impl ViewerApp {
         app
     }
 
-    fn free_current_texture(&mut self) {
-        if let Some(id) = self.texture_id.take() {
+    fn evict_distant_textures(&mut self) {
+        let nearby: Vec<PathBuf> = self.file_list.as_ref()
+            .map(|fl| fl.nearby_paths(3))
+            .unwrap_or_default();
+        let to_remove: Vec<PathBuf> = self.texture_cache.keys()
+            .filter(|p| !nearby.contains(p))
+            .cloned()
+            .collect();
+        if !to_remove.is_empty() {
             let mut renderer = self.render_state.renderer.write();
-            renderer.free_texture(&id);
+            for path in to_remove {
+                if let Some(entry) = self.texture_cache.remove(&path) {
+                    renderer.free_texture(&entry.texture_id);
+                }
+            }
         }
-        self.wgpu_texture = None;
-        self.free_video_texture();
+    }
+
+    fn pre_upload_nearby_textures(&mut self) {
+        let nearby = match self.file_list.as_ref() {
+            Some(fl) => fl.nearby_paths(3),
+            None => return,
+        };
+        for path in nearby {
+            if file_list::is_video_file(&path) {
+                continue;
+            }
+            if self.texture_cache.contains_key(&path) {
+                continue;
+            }
+            if let Some(pixels) = self.cache.get(&path) {
+                let (id, tex, actual_size) =
+                    image_decode::create_mipmapped_texture(&self.render_state, pixels);
+                self.texture_cache.insert(path, TextureEntry {
+                    texture_id: id,
+                    _wgpu_texture: tex,
+                    size: actual_size,
+                });
+                return;
+            }
+        }
     }
 
     fn free_video_texture(&mut self) {
@@ -291,7 +330,6 @@ impl ViewerApp {
     }
 
     fn load_current_image(&mut self) {
-        self.free_current_texture();
         self.stop_video();
         self.image_size = None;
         self.error_message = None;
@@ -938,6 +976,8 @@ impl ViewerApp {
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.cache.poll();
+        self.pre_upload_nearby_textures();
+        self.evict_distant_textures();
 
         if let Ok(path) = self.ipc_rx.try_recv() {
             self.open_file(&path);
@@ -1093,19 +1133,25 @@ impl eframe::App for ViewerApp {
                     .map(|p| p.to_path_buf());
 
                 if let Some(path) = current_path {
-                    if self.texture_id.is_none() {
-                        if let Some(pixels) = self.cache.get(&path) {
-                            let (id, tex, actual_size) =
-                                image_decode::create_mipmapped_texture(&self.render_state, pixels);
-                            self.image_size = Some(actual_size);
-                            self.texture_id = Some(id);
-                            self.wgpu_texture = Some(tex);
-                        }
-                    }
+                    let tex_info = if let Some(entry) = self.texture_cache.get(&path) {
+                        Some((entry.texture_id, entry.size))
+                    } else if let Some(pixels) = self.cache.get(&path) {
+                        let (id, tex, actual_size) =
+                            image_decode::create_mipmapped_texture(&self.render_state, pixels);
+                        self.texture_cache.insert(path.clone(), TextureEntry {
+                            texture_id: id,
+                            _wgpu_texture: tex,
+                            size: actual_size,
+                        });
+                        Some((id, actual_size))
+                    } else {
+                        None
+                    };
 
-                    if let (Some(tex_id), Some(img_size)) = (self.texture_id, &self.image_size) {
+                    if let Some((tex_id, img_size)) = tex_info {
+                        self.image_size = Some(img_size);
                         let center = ui.available_rect_before_wrap().center();
-                        let image_rect = self.compute_display_rect(img_size, available, center);
+                        let image_rect = self.compute_display_rect(&img_size, available, center);
 
                         let (response, painter) =
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
