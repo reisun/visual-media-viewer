@@ -266,40 +266,6 @@ fn generate_mipmaps_gpu(
     queue.submit(std::iter::once(encoder.finish()));
 }
 
-fn box_filter_mip(data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let new_w = (width / 2).max(1);
-    let new_h = (height / 2).max(1);
-    let w = width as usize;
-    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
-    for y in 0..new_h as usize {
-        for x in 0..new_w as usize {
-            let sx = x * 2;
-            let sy = y * 2;
-            let mut r = 0u32;
-            let mut g = 0u32;
-            let mut b = 0u32;
-            let mut a = 0u32;
-            for dy in 0..2usize {
-                for dx in 0..2usize {
-                    let px = (sx + dx).min(width as usize - 1);
-                    let py = (sy + dy).min(height as usize - 1);
-                    let idx = (py * w + px) * 4;
-                    r += data[idx] as u32;
-                    g += data[idx + 1] as u32;
-                    b += data[idx + 2] as u32;
-                    a += data[idx + 3] as u32;
-                }
-            }
-            let oi = (y * new_w as usize + x) * 4;
-            out[oi] = (r / 4) as u8;
-            out[oi + 1] = (g / 4) as u8;
-            out[oi + 2] = (b / 4) as u8;
-            out[oi + 3] = (a / 4) as u8;
-        }
-    }
-    (out, new_w, new_h)
-}
-
 fn color_image_to_rgba(img: &egui::ColorImage) -> Vec<u8> {
     let mut buf = Vec::with_capacity(img.pixels.len() * 4);
     for pixel in &img.pixels {
