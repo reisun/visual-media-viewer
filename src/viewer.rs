@@ -144,7 +144,7 @@ impl ViewerApp {
         let mut app = Self {
             image_size: None,
             file_list: None,
-            cache: ImageCache::new(512 * 1024 * 1024, render_state.device.limits().max_texture_dimension_2d),
+            cache: ImageCache::new(1_500_000_000, render_state.device.limits().max_texture_dimension_2d),
             transform,
             error_message: None,
             slideshow_active: false,
