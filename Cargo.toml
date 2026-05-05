@@ -3,6 +3,7 @@ name = "visual-media-viewer"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance image viewer powered by Rust + wgpu + egui"
+license = "MIT"
 
 [[bin]]
 name = "VisualMediaViewer"
