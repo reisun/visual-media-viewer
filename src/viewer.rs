@@ -140,7 +140,7 @@ impl ViewerApp {
             wgpu_texture: None,
             image_size: None,
             file_list: None,
-            cache: ImageCache::new(512 * 1024 * 1024),
+            cache: ImageCache::new(512 * 1024 * 1024, render_state.device.limits().max_texture_dimension_2d),
             transform,
             error_message: None,
             slideshow_active: false,
@@ -324,7 +324,7 @@ impl ViewerApp {
                     self.image_size = Some(pixels.size);
                 }
                 None => {
-                    match DecodedImage::load(&path) {
+                    match DecodedImage::load(&path, self.render_state.device.limits().max_texture_dimension_2d) {
                         Ok(decoded) => {
                             self.image_size = Some(decoded.pixels.size);
                             self.cache.insert(path, decoded.pixels);

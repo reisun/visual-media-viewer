@@ -23,10 +23,11 @@ pub struct ImageCache {
     receiver: mpsc::Receiver<DecodeResult>,
     sender: mpsc::Sender<DecodeResult>,
     pending: std::collections::HashSet<PathBuf>,
+    max_texture_dim: u32,
 }
 
 impl ImageCache {
-    pub fn new(max_bytes: usize) -> Self {
+    pub fn new(max_bytes: usize, max_texture_dim: u32) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             entries: HashMap::new(),
@@ -36,6 +37,7 @@ impl ImageCache {
             receiver,
             sender,
             pending: std::collections::HashSet::new(),
+            max_texture_dim,
         }
     }
 
@@ -93,9 +95,10 @@ impl ImageCache {
             self.pending.insert(path.clone());
             let sender = self.sender.clone();
             let path_clone = path.clone();
+            let max_texture_dim = self.max_texture_dim;
 
             thread::spawn(move || {
-                let result = match DecodedImage::load(&path_clone) {
+                let result = match DecodedImage::load(&path_clone, max_texture_dim) {
                     Ok(decoded) => Ok(decoded.pixels),
                     Err(e) => Err(e),
                 };
