@@ -1,7 +1,7 @@
 FROM rust:1.95-bookworm
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends mingw-w64 wget unzip clang libclang-dev && \
+    apt-get install -y --no-install-recommends mingw-w64 wget unzip clang libclang-dev cmake nasm && \
     rm -rf /var/lib/apt/lists/*
 
 # Download pre-built FFmpeg LGPL shared for Windows x86_64
@@ -12,8 +12,29 @@ RUN wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpe
     mv /opt/ffmpeg-n7.1-* /opt/ffmpeg-win64 && \
     rm /tmp/ffmpeg.zip
 
+# Cross-compile libjpeg-turbo for Windows x86_64 (static)
+RUN wget -q https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.0/libjpeg-turbo-3.1.0.tar.gz \
+    -O /tmp/libjpeg-turbo.tar.gz && \
+    tar xf /tmp/libjpeg-turbo.tar.gz -C /tmp && \
+    mkdir /tmp/libjpeg-turbo-3.1.0/build && \
+    cd /tmp/libjpeg-turbo-3.1.0/build && \
+    cmake .. \
+        -DCMAKE_SYSTEM_NAME=Windows \
+        -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+        -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+        -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+        -DCMAKE_INSTALL_PREFIX=/opt/libjpeg-turbo-win64 \
+        -DWITH_JAVA=OFF \
+        -DENABLE_SHARED=OFF && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/libjpeg-turbo*
+
 ENV FFMPEG_DIR=/opt/ffmpeg-win64
 ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+ENV TURBOJPEG_LIB_DIR=/opt/libjpeg-turbo-win64/lib
+ENV TURBOJPEG_INCLUDE_DIR=/opt/libjpeg-turbo-win64/include
+ENV TURBOJPEG_STATIC=1
 
 RUN rustup target add x86_64-pc-windows-gnu
 
