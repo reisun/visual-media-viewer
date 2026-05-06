@@ -61,7 +61,8 @@ impl AudioClock {
     }
 
     fn set_latency(&self, latency_secs: f64) {
-        self.latency_bits.store(latency_secs.to_bits(), Ordering::Relaxed);
+        self.latency_bits
+            .store(latency_secs.to_bits(), Ordering::Relaxed);
     }
 
     fn get(&self) -> Option<f64> {
@@ -174,7 +175,10 @@ impl VideoPlayer {
         let video_codec_id = unsafe { (*video_codec_par.as_ptr()).codec_id };
         let ctx = ffmpeg_next::codec::context::Context::from_parameters(video_codec_par)
             .map_err(|e| format!("Video codec context failed: {}", e))?;
-        let dec = ctx.decoder().video().map_err(|e| format!("Video decoder failed: {}", e))?;
+        let dec = ctx
+            .decoder()
+            .video()
+            .map_err(|e| format!("Video decoder failed: {}", e))?;
         let width = dec.width();
         let height = dec.height();
 
@@ -184,14 +188,20 @@ impl VideoPlayer {
         );
         log::info!("{}", video_info);
 
-        let has_audio = ictx.streams().best(ffmpeg_next::media::Type::Audio).is_some();
+        let has_audio = ictx
+            .streams()
+            .best(ffmpeg_next::media::Type::Audio)
+            .is_some();
         let mut audio_info_str = String::new();
         if let Some(s) = ictx.streams().best(ffmpeg_next::media::Type::Audio) {
             let atb = s.time_base();
             let audio_time_base = atb.0 as f64 / atb.1 as f64;
             let par = s.parameters();
             let audio_codec_id = unsafe { (*par.as_ptr()).codec_id };
-            audio_info_str = format!("Audio: codec_id={:?} tb={}", audio_codec_id, audio_time_base);
+            audio_info_str = format!(
+                "Audio: codec_id={:?} tb={}",
+                audio_codec_id, audio_time_base
+            );
             log::info!("{}", audio_info_str);
         }
         let diag_info = format!("{}\n{}", video_info, audio_info_str);
@@ -327,7 +337,15 @@ impl VideoPlayer {
 
         if audio_decoder.is_some() {
             if let Ok((device, config, _sr, ch)) = get_audio_device_info() {
-                match setup_audio_output(&device, config, volume_clone, Arc::clone(&audio_paused), Arc::clone(&audio_clock), ch, Arc::clone(&buffered_bytes)) {
+                match setup_audio_output(
+                    &device,
+                    config,
+                    volume_clone,
+                    Arc::clone(&audio_paused),
+                    Arc::clone(&audio_clock),
+                    ch,
+                    Arc::clone(&buffered_bytes),
+                ) {
                     Ok((tx, stream)) => {
                         audio_sample_tx = Some(tx);
                         audio_stream = Some(stream);
@@ -355,9 +373,16 @@ impl VideoPlayer {
         let video_thread = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 video_decoder_loop(
-                    video_decoder, src_w, src_h, video_time_base,
-                    video_pkt_rx, frame_tx, audio_clock_for_video, seek_target,
-                    stop_flag_for_video, buffered_bytes_for_video,
+                    video_decoder,
+                    src_w,
+                    src_h,
+                    video_time_base,
+                    video_pkt_rx,
+                    frame_tx,
+                    audio_clock_for_video,
+                    seek_target,
+                    stop_flag_for_video,
+                    buffered_bytes_for_video,
                 );
             }));
             if let Err(e) = result {
@@ -375,11 +400,21 @@ impl VideoPlayer {
         let demuxer_thread = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 demuxer_audio_loop(
-                    video_idx, video_time_base,
-                    audio_idx, audio_time_base, audio_decoder,
-                    ictx, video_pkt_tx, audio_sample_tx, cmd_rx,
-                    device_sample_rate, device_channels, audio_clock_for_demuxer, seek_target,
-                    stop_flag_for_demuxer, buffered_bytes_for_demuxer,
+                    video_idx,
+                    video_time_base,
+                    audio_idx,
+                    audio_time_base,
+                    audio_decoder,
+                    ictx,
+                    video_pkt_tx,
+                    audio_sample_tx,
+                    cmd_rx,
+                    device_sample_rate,
+                    device_channels,
+                    audio_clock_for_demuxer,
+                    seek_target,
+                    stop_flag_for_demuxer,
+                    buffered_bytes_for_demuxer,
                 );
             }));
             if let Err(e) = result {
@@ -473,7 +508,10 @@ impl VideoPlayer {
                         Ok(frame) => self.prebuffer_queue.push_back(frame),
                         Err(mpsc::TryRecvError::Empty) => break,
                         Err(mpsc::TryRecvError::Disconnected) => {
-                            log::warn!("[poll_frame] frame_rx disconnected during prebuffer, queue_len={}", self.prebuffer_queue.len());
+                            log::warn!(
+                                "[poll_frame] frame_rx disconnected during prebuffer, queue_len={}",
+                                self.prebuffer_queue.len()
+                            );
                             disconnected = true;
                             break;
                         }
@@ -489,7 +527,11 @@ impl VideoPlayer {
                 self.begin_prebuffer();
             }
             if self.prebuffer_ready() || disconnected {
-                log::info!("[poll_frame] prebuffer done: queue_len={} disconnected={}", self.prebuffer_queue.len(), disconnected);
+                log::info!(
+                    "[poll_frame] prebuffer done: queue_len={} disconnected={}",
+                    self.prebuffer_queue.len(),
+                    disconnected
+                );
                 self.finish_prebuffer();
                 self.current_frame = self.prebuffer_queue.pop_front();
                 self.buffered_frame = self.prebuffer_queue.pop_front();
@@ -570,7 +612,14 @@ impl VideoPlayer {
     }
 
     pub fn toggle_pause(&mut self) {
-        log::info!("[player] toggle_pause current_state={}", match self.state { PlaybackState::Playing => "Playing", PlaybackState::Paused => "Paused", PlaybackState::Finished => "Finished" });
+        log::info!(
+            "[player] toggle_pause current_state={}",
+            match self.state {
+                PlaybackState::Playing => "Playing",
+                PlaybackState::Paused => "Paused",
+                PlaybackState::Finished => "Finished",
+            }
+        );
         match self.state {
             PlaybackState::Playing => {
                 self.state = PlaybackState::Paused;
@@ -622,10 +671,15 @@ impl Drop for VideoPlayer {
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-fn get_audio_device_info() -> Result<(cpal::Device, cpal::SupportedStreamConfig, u32, u16), String> {
+fn get_audio_device_info() -> Result<(cpal::Device, cpal::SupportedStreamConfig, u32, u16), String>
+{
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or("No audio output device")?;
-    let config = device.default_output_config().map_err(|e| format!("Audio config error: {}", e))?;
+    let device = host
+        .default_output_device()
+        .ok_or("No audio output device")?;
+    let config = device
+        .default_output_config()
+        .map_err(|e| format!("Audio config error: {}", e))?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels();
     Ok((device, config, sample_rate, channels))
@@ -643,15 +697,36 @@ fn setup_audio_output(
     let (tx, rx) = mpsc::channel::<AudioChunk>();
 
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            build_audio_stream::<f32>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
-        }
-        cpal::SampleFormat::I16 => {
-            build_audio_stream::<i16>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
-        }
-        cpal::SampleFormat::U16 => {
-            build_audio_stream::<u16>(device, &config.into(), rx, volume, paused, audio_clock, channels, Arc::clone(&buffered_bytes))?
-        }
+        cpal::SampleFormat::F32 => build_audio_stream::<f32>(
+            device,
+            &config.into(),
+            rx,
+            volume,
+            paused,
+            audio_clock,
+            channels,
+            Arc::clone(&buffered_bytes),
+        )?,
+        cpal::SampleFormat::I16 => build_audio_stream::<i16>(
+            device,
+            &config.into(),
+            rx,
+            volume,
+            paused,
+            audio_clock,
+            channels,
+            Arc::clone(&buffered_bytes),
+        )?,
+        cpal::SampleFormat::U16 => build_audio_stream::<u16>(
+            device,
+            &config.into(),
+            rx,
+            volume,
+            paused,
+            audio_clock,
+            channels,
+            Arc::clone(&buffered_bytes),
+        )?,
         _ => return Err("Unsupported audio sample format".to_string()),
     };
 
@@ -700,7 +775,8 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                     if buf_pos >= buffer.len() {
                         match rx.try_recv() {
                             Ok(chunk) => {
-                                buffered_bytes.fetch_sub(chunk.samples.len() * 4, Ordering::Relaxed);
+                                buffered_bytes
+                                    .fetch_sub(chunk.samples.len() * 4, Ordering::Relaxed);
                                 if !base_set {
                                     audio_clock.set_base(chunk.pts);
                                     base_set = true;
@@ -798,8 +874,12 @@ fn demuxer_audio_loop(
         let out_format =
             ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Packed);
         let r = ffmpeg_next::software::resampling::Context::get(
-            adec.format(), adec.channel_layout(), adec.rate(),
-            out_format, out_layout, device_sample_rate,
+            adec.format(),
+            adec.channel_layout(),
+            adec.rate(),
+            out_format,
+            out_layout,
+            device_sample_rate,
         );
         match r {
             Ok(ctx) => resampler = Some(ctx),
@@ -808,7 +888,11 @@ fn demuxer_audio_loop(
     }
 
     let mut audio_frame = ffmpeg_next::frame::Audio::empty();
-    let mut audio_seek_target: Option<f64> = if seek_target > 0.1 { Some(seek_target) } else { None };
+    let mut audio_seek_target: Option<f64> = if seek_target > 0.1 {
+        Some(seek_target)
+    } else {
+        None
+    };
     let resampled_channels = if device_channels >= 2 { 2 } else { 1 };
 
     let mut audio_chunks_sent: u64 = 0;
@@ -819,7 +903,12 @@ fn demuxer_audio_loop(
 
     const MAX_BUFFERED_BYTES: usize = 50 * 1024 * 1024;
 
-    log::info!("[demuxer] start: video_idx={} audio_idx={:?} seek={:.3}", video_idx, audio_idx, seek_target);
+    log::info!(
+        "[demuxer] start: video_idx={} audio_idx={:?} seek={:.3}",
+        video_idx,
+        audio_idx,
+        seek_target
+    );
 
     let mut packet = ffmpeg_next::Packet::empty();
     loop {
@@ -833,8 +922,12 @@ fn demuxer_audio_loop(
         }
 
         while buffered_bytes.load(Ordering::Relaxed) > MAX_BUFFERED_BYTES {
-            if stop_flag.load(Ordering::Relaxed) { return; }
-            if let Ok(Command::Stop) = cmd_rx.try_recv() { return; }
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Ok(Command::Stop) = cmd_rx.try_recv() {
+                return;
+            }
             thread::sleep(Duration::from_millis(10));
         }
 
@@ -848,7 +941,12 @@ fn demuxer_audio_loop(
         match packet.read(&mut ictx) {
             Ok(..) => {}
             Err(ffmpeg_next::Error::Eof) => {
-                log::info!("[demuxer] EOF (a_sent={} v_pkt_sent={} last_apts={:.3})", audio_chunks_sent, video_packets_sent, last_audio_pts);
+                log::info!(
+                    "[demuxer] EOF (a_sent={} v_pkt_sent={} last_apts={:.3})",
+                    audio_chunks_sent,
+                    video_packets_sent,
+                    last_audio_pts
+                );
                 break;
             }
             Err(e) => {
@@ -879,14 +977,24 @@ fn demuxer_audio_loop(
             };
             let vpd_bytes = data.len();
             buffered_bytes.fetch_add(vpd_bytes, Ordering::Relaxed);
-            if video_pkt_tx.send(VideoPacketData { data, pts: pts_raw, dts, flags }).is_err() {
+            if video_pkt_tx
+                .send(VideoPacketData {
+                    data,
+                    pts: pts_raw,
+                    dts,
+                    flags,
+                })
+                .is_err()
+            {
                 log::info!("[demuxer] video_pkt_tx disconnected, exiting");
                 return;
             }
             video_packets_sent += 1;
         } else if Some(stream_idx) == audio_idx {
             if let Some(ref mut adec) = audio_decoder {
-                if adec.send_packet(&packet).is_err() { continue; }
+                if adec.send_packet(&packet).is_err() {
+                    continue;
+                }
                 while adec.receive_frame(&mut audio_frame).is_ok() {
                     let raw_apts = unsafe { (*audio_frame.as_ptr()).best_effort_timestamp };
                     let apts = if raw_apts != ffmpeg_next::ffi::AV_NOPTS_VALUE {
@@ -895,19 +1003,33 @@ fn demuxer_audio_loop(
                         audio_frame.pts().unwrap_or(0) as f64 * audio_time_base
                     };
                     if let Some(target) = audio_seek_target {
-                        if apts < target - 0.05 { continue; }
+                        if apts < target - 0.05 {
+                            continue;
+                        }
                         audio_seek_target = None;
                     }
-                    if let (Some(ref mut resampler_ctx), Some(ref atx)) = (&mut resampler, &audio_tx) {
+                    if let (Some(ref mut resampler_ctx), Some(ref atx)) =
+                        (&mut resampler, &audio_tx)
+                    {
                         let mut resampled = ffmpeg_next::frame::Audio::empty();
                         if resampler_ctx.run(&audio_frame, &mut resampled).is_ok() {
                             let samples = extract_f32_samples(&resampled, resampled_channels);
                             if !samples.is_empty() {
-                                let adapted = adapt_channels(&samples, resampled_channels, device_channels);
+                                let adapted =
+                                    adapt_channels(&samples, resampled_channels, device_channels);
                                 let chunk_bytes = adapted.len() * 4;
                                 buffered_bytes.fetch_add(chunk_bytes, Ordering::Relaxed);
-                                if atx.send(AudioChunk { samples: adapted, pts: apts }).is_err() {
-                                    log::error!("[demuxer] audio_tx disconnected at apts={:.3}", apts);
+                                if atx
+                                    .send(AudioChunk {
+                                        samples: adapted,
+                                        pts: apts,
+                                    })
+                                    .is_err()
+                                {
+                                    log::error!(
+                                        "[demuxer] audio_tx disconnected at apts={:.3}",
+                                        apts
+                                    );
                                     return;
                                 }
                                 audio_chunks_sent += 1;
@@ -931,14 +1053,21 @@ fn demuxer_audio_loop(
                     if !samples.is_empty() {
                         let adapted = adapt_channels(&samples, resampled_channels, device_channels);
                         let apts = last_audio_pts;
-                        let _ = atx.send(AudioChunk { samples: adapted, pts: apts });
+                        let _ = atx.send(AudioChunk {
+                            samples: adapted,
+                            pts: apts,
+                        });
                     }
                 }
             }
         }
     }
 
-    log::info!("[demuxer] thread exiting (a_sent={} v_pkt_sent={})", audio_chunks_sent, video_packets_sent);
+    log::info!(
+        "[demuxer] thread exiting (a_sent={} v_pkt_sent={})",
+        audio_chunks_sent,
+        video_packets_sent
+    );
 }
 
 // --- Thread 2: Video Decoder ---
@@ -959,8 +1088,12 @@ fn video_decoder_loop(
     let (out_w, out_h) = fit_dimensions(src_w, src_h, 1920, 1080);
 
     let scaler_result = ffmpeg_next::software::scaling::Context::get(
-        video_decoder.format(), src_w, src_h,
-        ffmpeg_next::format::Pixel::RGBA, out_w, out_h,
+        video_decoder.format(),
+        src_w,
+        src_h,
+        ffmpeg_next::format::Pixel::RGBA,
+        out_w,
+        out_h,
         ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
     );
     let mut scaler = match scaler_result {
@@ -976,7 +1109,11 @@ fn video_decoder_loop(
     let frame_buf_size = (out_w as usize) * (out_h as usize) * 4;
     let mut reuse_buf: Vec<u8> = Vec::with_capacity(frame_buf_size);
 
-    let mut video_seek_target: Option<f64> = if seek_target > 0.1 { Some(seek_target) } else { None };
+    let mut video_seek_target: Option<f64> = if seek_target > 0.1 {
+        Some(seek_target)
+    } else {
+        None
+    };
     let mut video_frames_sent: u64 = 0;
     let mut video_frames_dropped: u64 = 0;
     let mut video_started = false;
@@ -984,7 +1121,13 @@ fn video_decoder_loop(
     let mut last_log_time = Instant::now();
     let mut packets_received: u64 = 0;
 
-    log::info!("[video] start: out={}x{} fmt={:?} seek={:.3}", out_w, out_h, video_decoder.format(), seek_target);
+    log::info!(
+        "[video] start: out={}x{} fmt={:?} seek={:.3}",
+        out_w,
+        out_h,
+        video_decoder.format(),
+        seek_target
+    );
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -1001,7 +1144,13 @@ fn video_decoder_loop(
         buffered_bytes.fetch_sub(vpd.data.len(), Ordering::Relaxed);
         packets_received += 1;
         if packets_received == 1 {
-            log::info!("[video] first packet received: size={} pts={} dts={} flags={}", vpd.data.len(), vpd.pts, vpd.dts, vpd.flags);
+            log::info!(
+                "[video] first packet received: size={} pts={} dts={} flags={}",
+                vpd.data.len(),
+                vpd.pts,
+                vpd.dts,
+                vpd.flags
+            );
         }
 
         // Reconstruct packet from transferred data
@@ -1029,7 +1178,9 @@ fn video_decoder_loop(
                 decoded_frame.pts().unwrap_or(0) as f64 * video_time_base
             };
             if let Some(target) = video_seek_target {
-                if pts < target - 0.05 { continue; }
+                if pts < target - 0.05 {
+                    continue;
+                }
                 video_seek_target = None;
             }
             if let Some(apts) = audio_clock.get() {
@@ -1038,9 +1189,16 @@ fn video_decoder_loop(
                     continue;
                 }
             }
-            if scaler.run(&decoded_frame, &mut rgba_frame).is_err() { continue; }
+            if scaler.run(&decoded_frame, &mut rgba_frame).is_err() {
+                continue;
+            }
             let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
-            let vframe = VideoFrame { rgba: reuse_buf.clone(), width, height, pts };
+            let vframe = VideoFrame {
+                rgba: reuse_buf.clone(),
+                width,
+                height,
+                pts,
+            };
             if !video_started {
                 video_started = true;
                 log::info!("[video] first frame decoded at pts={:.3}", pts);
@@ -1059,7 +1217,13 @@ fn video_decoder_loop(
         }
 
         if last_log_time.elapsed().as_secs() >= 2 {
-            log::info!("[video] stats: pkts={} v_sent={} v_drop={} last_vpts={:.3}", packets_received, video_frames_sent, video_frames_dropped, last_video_pts);
+            log::info!(
+                "[video] stats: pkts={} v_sent={} v_drop={} last_vpts={:.3}",
+                packets_received,
+                video_frames_sent,
+                video_frames_dropped,
+                last_video_pts
+            );
             last_log_time = Instant::now();
         }
     }
@@ -1071,10 +1235,19 @@ fn video_decoder_loop(
         if scaler.run(&decoded_frame, &mut rgba_frame).is_ok() {
             let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
             let pts = decoded_frame.pts().unwrap_or(0) as f64 * video_time_base;
-            let _ = frame_tx.send(VideoFrame { rgba: reuse_buf.clone(), width, height, pts });
+            let _ = frame_tx.send(VideoFrame {
+                rgba: reuse_buf.clone(),
+                width,
+                height,
+                pts,
+            });
         }
     }
-    log::info!("[video] thread exiting (v_sent={} v_drop={})", video_frames_sent, video_frames_dropped);
+    log::info!(
+        "[video] thread exiting (v_sent={} v_drop={})",
+        video_frames_sent,
+        video_frames_dropped
+    );
 }
 
 fn extract_f32_samples(frame: &ffmpeg_next::frame::Audio, expected_channels: u16) -> Vec<f32> {
@@ -1094,11 +1267,7 @@ fn extract_f32_samples(frame: &ffmpeg_next::frame::Audio, expected_channels: u16
     }
     let mut samples = vec![0.0f32; sample_count];
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            data_ptr,
-            samples.as_mut_ptr() as *mut u8,
-            byte_len,
-        );
+        std::ptr::copy_nonoverlapping(data_ptr, samples.as_mut_ptr() as *mut u8, byte_len);
     }
     samples
 }
