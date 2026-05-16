@@ -344,7 +344,7 @@ impl ViewerApp {
         };
 
         if file_list::is_video_file(&path) {
-            match VideoPlayer::open(&path) {
+            match VideoPlayer::open(&path, self.settings.normalize_audio) {
                 Ok(player) => {
                     player.set_volume(self.settings.volume);
                     self.video_size = Some(player.video_size);
@@ -584,6 +584,30 @@ impl ViewerApp {
         };
         if let Some(d) = dir {
             self.open_directory(&d);
+        }
+    }
+
+    fn video_seek_clamped(&mut self, delta: f64) {
+        const EDGE_THRESHOLD: f64 = 2.0;
+        if let Some(player) = &mut self.video_player {
+            let current = player.current_pts();
+            let target = current + delta;
+            let duration = player.duration;
+            if target < 0.0 {
+                if current > EDGE_THRESHOLD {
+                    player.seek(0.0).ok();
+                } else {
+                    self.prev_image();
+                }
+            } else if target >= duration && duration > 0.0 {
+                if (duration - current) > EDGE_THRESHOLD {
+                    player.seek((duration - 0.1).max(0.0)).ok();
+                } else {
+                    self.next_image();
+                }
+            } else {
+                player.seek(target).ok();
+            }
         }
     }
 
@@ -834,6 +858,16 @@ impl ViewerApp {
                         self.save_settings();
                     }
                 });
+                {
+                    let mut norm = self.settings.normalize_audio;
+                    if ui.checkbox(&mut norm, "音量ノーマライズ").changed() {
+                        self.settings.normalize_audio = norm;
+                        if let Some(player) = &self.video_player {
+                            player.set_normalize(norm);
+                        }
+                        self.save_settings();
+                    }
+                }
 
                 ui.add_space(8.0);
 
@@ -1012,30 +1046,38 @@ impl eframe::App for ViewerApp {
                     }
                     return Some("left");
                 }
-                if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::PageUp) {
+                if i.key_pressed(egui::Key::PageUp) {
+                    if is_video {
+                        return Some("video_skip_back_5min");
+                    }
                     return Some("prev_folder");
                 }
-                if i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::PageDown) {
+                if i.key_pressed(egui::Key::PageDown) {
+                    if is_video {
+                        return Some("video_skip_fwd_5min");
+                    }
+                    return Some("next_folder");
+                }
+                if i.key_pressed(egui::Key::ArrowUp) {
+                    return Some("prev_folder");
+                }
+                if i.key_pressed(egui::Key::ArrowDown) {
                     return Some("next_folder");
                 }
                 None
             });
             match nav {
                 Some("video_skip_forward") => {
-                    if let Some(player) = &mut self.video_player {
-                        let current = player.current_pts();
-                        if player.seek(current + 5.0).is_err() {
-                            self.next_image();
-                        }
-                    }
+                    self.video_seek_clamped(5.0);
                 }
                 Some("video_skip_backward") => {
-                    if let Some(player) = &mut self.video_player {
-                        let current = player.current_pts();
-                        if player.seek(current - 5.0).is_err() {
-                            self.prev_image();
-                        }
-                    }
+                    self.video_seek_clamped(-5.0);
+                }
+                Some("video_skip_fwd_5min") => {
+                    self.video_seek_clamped(300.0);
+                }
+                Some("video_skip_back_5min") => {
+                    self.video_seek_clamped(-300.0);
                 }
                 Some("right") => self.next_image(),
                 Some("left") => self.prev_image(),
