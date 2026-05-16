@@ -47,6 +47,8 @@ pub struct Settings {
     pub window_height: f32,
     #[serde(default)]
     pub maximized: bool,
+    #[serde(default)]
+    pub normalize_audio: bool,
 }
 
 fn default_volume() -> u16 {
@@ -80,6 +82,7 @@ impl Default for Settings {
             window_width: 1280.0,
             window_height: 720.0,
             maximized: false,
+            normalize_audio: false,
         }
     }
 }

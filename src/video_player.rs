@@ -110,6 +110,7 @@ pub struct VideoPlayer {
     pub diag_info: String,
     has_audio: bool,
     volume: Arc<AtomicU16>,
+    normalize: Arc<AtomicBool>,
     session: Option<PlaybackSession>,
     current_frame: Option<VideoFrame>,
     buffered_frame: Option<VideoFrame>,
@@ -122,7 +123,7 @@ pub struct VideoPlayer {
 }
 
 impl VideoPlayer {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path, normalize: bool) -> Result<Self, String> {
         ffmpeg_next::init().map_err(|e| format!("FFmpeg init failed: {}", e))?;
 
         let (duration, video_size, diag_info, has_audio) = Self::probe(path)?;
@@ -136,6 +137,7 @@ impl VideoPlayer {
             diag_info,
             has_audio,
             volume,
+            normalize: Arc::new(AtomicBool::new(normalize)),
             session: None,
             current_frame: None,
             buffered_frame: None,
@@ -319,6 +321,7 @@ impl VideoPlayer {
         // Audio output
         let audio_paused = Arc::new(AtomicBool::new(true));
         let volume_clone = Arc::clone(&self.volume);
+        let normalize_clone = Arc::clone(&self.normalize);
 
         let mut device_sample_rate: u32 = 48000;
         let mut device_channels: u16 = 2;
@@ -345,6 +348,7 @@ impl VideoPlayer {
                     Arc::clone(&audio_clock),
                     ch,
                     Arc::clone(&buffered_bytes),
+                    Arc::clone(&normalize_clone),
                 ) {
                     Ok((tx, stream)) => {
                         audio_sample_tx = Some(tx);
@@ -655,6 +659,10 @@ impl VideoPlayer {
         self.volume.store(vol.min(200), Ordering::Relaxed);
     }
 
+    pub fn set_normalize(&self, on: bool) {
+        self.normalize.store(on, Ordering::Relaxed);
+    }
+
     pub fn stop(&mut self) {
         self.stop_session();
         self.state = PlaybackState::Finished;
@@ -693,6 +701,7 @@ fn setup_audio_output(
     audio_clock: Arc<AudioClock>,
     channels: u16,
     buffered_bytes: Arc<AtomicUsize>,
+    normalize: Arc<AtomicBool>,
 ) -> Result<(mpsc::Sender<AudioChunk>, cpal::Stream), String> {
     let (tx, rx) = mpsc::channel::<AudioChunk>();
 
@@ -706,6 +715,7 @@ fn setup_audio_output(
             audio_clock,
             channels,
             Arc::clone(&buffered_bytes),
+            Arc::clone(&normalize),
         )?,
         cpal::SampleFormat::I16 => build_audio_stream::<i16>(
             device,
@@ -716,6 +726,7 @@ fn setup_audio_output(
             audio_clock,
             channels,
             Arc::clone(&buffered_bytes),
+            Arc::clone(&normalize),
         )?,
         cpal::SampleFormat::U16 => build_audio_stream::<u16>(
             device,
@@ -726,6 +737,7 @@ fn setup_audio_output(
             audio_clock,
             channels,
             Arc::clone(&buffered_bytes),
+            Arc::clone(&normalize),
         )?,
         _ => return Err("Unsupported audio sample format".to_string()),
     };
@@ -742,6 +754,7 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     audio_clock: Arc<AudioClock>,
     channels: u16,
     buffered_bytes: Arc<AtomicUsize>,
+    normalize: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     let mut buffer: Vec<f32> = Vec::new();
     let mut buf_pos: usize = 0;
@@ -749,6 +762,7 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
     let samples_per_frame = channels as usize;
     let sample_rate_f = config.sample_rate.0 as f64;
     let mut latency_set = false;
+    let mut norm_gain: f32 = 1.0;
 
     let stream = device
         .build_output_stream(
@@ -783,6 +797,12 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                                 }
                                 buffer = chunk.samples;
                                 buf_pos = 0;
+                                if normalize.load(Ordering::Relaxed) {
+                                    let peak = buffer.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                                    norm_gain = if peak > 0.001 { (1.0 / peak).min(10.0) } else { 1.0 };
+                                } else {
+                                    norm_gain = 1.0;
+                                }
                             }
                             Err(mpsc::TryRecvError::Empty) => {
                                 *sample = T::from_sample(0.0f32);
@@ -796,7 +816,7 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                         }
                     }
 
-                    *sample = T::from_sample(buffer[buf_pos] * vol);
+                    *sample = T::from_sample(buffer[buf_pos] * vol * norm_gain);
                     buf_pos += 1;
                     audio_clock.advance(1);
                 }
@@ -1075,8 +1095,8 @@ fn demuxer_audio_loop(
 // Blocks on frame_tx.send() — this does NOT affect audio production.
 fn video_decoder_loop(
     mut video_decoder: ffmpeg_next::decoder::Video,
-    src_w: u32,
-    src_h: u32,
+    _src_w: u32,
+    _src_h: u32,
     video_time_base: f64,
     video_pkt_rx: mpsc::Receiver<VideoPacketData>,
     frame_tx: mpsc::SyncSender<VideoFrame>,
@@ -1085,29 +1105,13 @@ fn video_decoder_loop(
     stop_flag: Arc<AtomicBool>,
     buffered_bytes: Arc<AtomicUsize>,
 ) {
-    let (out_w, out_h) = fit_dimensions(src_w, src_h, 1920, 1080);
-
-    let scaler_result = ffmpeg_next::software::scaling::Context::get(
-        video_decoder.format(),
-        src_w,
-        src_h,
-        ffmpeg_next::format::Pixel::RGBA,
-        out_w,
-        out_h,
-        ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
-    );
-    let mut scaler = match scaler_result {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("[video] scaler creation failed: {}", e);
-            return;
-        }
-    };
+    let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
+    let mut out_w: u32 = 0;
+    let mut out_h: u32 = 0;
 
     let mut decoded_frame = ffmpeg_next::frame::Video::empty();
     let mut rgba_frame = ffmpeg_next::frame::Video::empty();
-    let frame_buf_size = (out_w as usize) * (out_h as usize) * 4;
-    let mut reuse_buf: Vec<u8> = Vec::with_capacity(frame_buf_size);
+    let mut reuse_buf: Vec<u8> = Vec::new();
 
     let mut video_seek_target: Option<f64> = if seek_target > 0.1 {
         Some(seek_target)
@@ -1122,9 +1126,7 @@ fn video_decoder_loop(
     let mut packets_received: u64 = 0;
 
     log::info!(
-        "[video] start: out={}x{} fmt={:?} seek={:.3}",
-        out_w,
-        out_h,
+        "[video] start: param_fmt={:?} seek={:.3}",
         video_decoder.format(),
         seek_target
     );
@@ -1189,7 +1191,36 @@ fn video_decoder_loop(
                     continue;
                 }
             }
-            if scaler.run(&decoded_frame, &mut rgba_frame).is_err() {
+            if scaler.is_none() {
+                let actual_w = decoded_frame.width();
+                let actual_h = decoded_frame.height();
+                let (fw, fh) = fit_dimensions(actual_w, actual_h, 1920, 1080);
+                out_w = fw;
+                out_h = fh;
+                log::info!(
+                    "[video] creating scaler: {:?} {}x{} -> RGBA {}x{}",
+                    decoded_frame.format(), actual_w, actual_h, out_w, out_h
+                );
+                match ffmpeg_next::software::scaling::Context::get(
+                    decoded_frame.format(),
+                    actual_w,
+                    actual_h,
+                    ffmpeg_next::format::Pixel::RGBA,
+                    out_w,
+                    out_h,
+                    ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
+                ) {
+                    Ok(s) => {
+                        reuse_buf = Vec::with_capacity((out_w as usize) * (out_h as usize) * 4);
+                        scaler = Some(s);
+                    }
+                    Err(e) => {
+                        log::error!("[video] scaler creation failed: {}", e);
+                        return;
+                    }
+                }
+            }
+            if scaler.as_mut().unwrap().run(&decoded_frame, &mut rgba_frame).is_err() {
                 continue;
             }
             let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
@@ -1232,15 +1263,17 @@ fn video_decoder_loop(
     log::info!("[video] flushing decoder");
     let _ = video_decoder.send_eof();
     while video_decoder.receive_frame(&mut decoded_frame).is_ok() {
-        if scaler.run(&decoded_frame, &mut rgba_frame).is_ok() {
-            let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
-            let pts = decoded_frame.pts().unwrap_or(0) as f64 * video_time_base;
-            let _ = frame_tx.send(VideoFrame {
-                rgba: reuse_buf.clone(),
-                width,
-                height,
-                pts,
-            });
+        if let Some(ref mut s) = scaler {
+            if s.run(&decoded_frame, &mut rgba_frame).is_ok() {
+                let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
+                let pts = decoded_frame.pts().unwrap_or(0) as f64 * video_time_base;
+                let _ = frame_tx.send(VideoFrame {
+                    rgba: reuse_buf.clone(),
+                    width,
+                    height,
+                    pts,
+                });
+            }
         }
     }
     log::info!(
