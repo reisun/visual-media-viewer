@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "heic", "heif"];
-const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mkv", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ts"];
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "heic", "heif",
+];
+const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mkv", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ts",
+];
 
 #[cfg(target_os = "windows")]
 mod win_sort {
@@ -64,12 +68,10 @@ pub fn is_video_file(path: &Path) -> bool {
 
 pub fn directory_has_images(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .any(|e| {
-                let p = e.path();
-                p.is_file() && is_supported_media(&p)
-            }),
+        Ok(entries) => entries.filter_map(|e| e.ok()).any(|e| {
+            let p = e.path();
+            p.is_file() && is_supported_media(&p)
+        }),
         Err(_) => false,
     }
 }
@@ -161,7 +163,11 @@ impl FileList {
                 .filter(|path| path.is_file() && is_supported_media(path))
                 .collect(),
             Err(e) => {
-                log::warn!("Failed to read directory {}: {}", self.directory.display(), e);
+                log::warn!(
+                    "Failed to read directory {}: {}",
+                    self.directory.display(),
+                    e
+                );
                 Vec::new()
             }
         };
@@ -256,6 +262,33 @@ impl FileList {
         self.current_index
     }
 
+    pub fn advance_clamped_with_edge_loop(&mut self, delta: isize) -> bool {
+        if self.files.len() <= 1 || delta == 0 {
+            return false;
+        }
+
+        let old_index = self.current_index;
+        let last_index = self.files.len() - 1;
+
+        if delta > 0 {
+            let step = delta as usize;
+            if self.current_index == last_index {
+                self.current_index = 0;
+            } else {
+                self.current_index = (self.current_index + step).min(last_index);
+            }
+        } else {
+            let step = delta.unsigned_abs();
+            if self.current_index == 0 {
+                self.current_index = last_index;
+            } else {
+                self.current_index = self.current_index.saturating_sub(step);
+            }
+        }
+
+        self.current_index != old_index
+    }
+
     pub fn nearby_paths(&self, range: usize) -> Vec<PathBuf> {
         let start = self.current_index.saturating_sub(range);
         let end = (self.current_index + range + 1).min(self.files.len());
@@ -278,6 +311,24 @@ impl FileList {
             group_by: self.group_by,
         };
         prev_image_dir_from(&self.directory, &opts)
+    }
+
+    pub fn next_grandparent_sibling_branch(&self) -> Option<PathBuf> {
+        let opts = DirSortOpts {
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            group_by: self.group_by,
+        };
+        next_grandparent_sibling_branch_from(&self.directory, &opts)
+    }
+
+    pub fn prev_grandparent_sibling_branch(&self) -> Option<PathBuf> {
+        let opts = DirSortOpts {
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            group_by: self.group_by,
+        };
+        prev_grandparent_sibling_branch_from(&self.directory, &opts)
     }
 }
 
@@ -320,9 +371,7 @@ fn sorted_child_dirs(dir: &Path, opts: &DirSortOpts) -> Vec<PathBuf> {
                 let b_name = b.file_name().unwrap_or_default().to_string_lossy();
                 win_sort::compare_logical(&a_name, &b_name)
             }
-            SortKey::ModifiedDate => {
-                file_modified_time(a).cmp(&file_modified_time(b))
-            }
+            SortKey::ModifiedDate => file_modified_time(a).cmp(&file_modified_time(b)),
         };
         match opts.sort_order {
             SortOrder::Ascending => cmp,
@@ -366,6 +415,13 @@ fn last_image_dir_in_subtree(dir: &Path, depth: usize, opts: &DirSortOpts) -> Op
         return Some(dir.to_path_buf());
     }
     None
+}
+
+fn first_image_dir_in_branch(dir: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
+    if directory_has_images(dir) {
+        return Some(dir.to_path_buf());
+    }
+    first_image_dir_under(dir, 0, opts)
 }
 
 fn next_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
@@ -417,9 +473,57 @@ fn prev_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     None
 }
 
+fn next_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let grandparent = parent.parent()?;
+    let siblings = sorted_child_dirs(grandparent, opts);
+    let idx = siblings.iter().position(|d| d == parent)?;
+
+    for sibling in &siblings[idx + 1..] {
+        if let Some(dir) = first_image_dir_in_branch(sibling, opts) {
+            return Some(dir);
+        }
+    }
+
+    None
+}
+
+fn prev_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let grandparent = parent.parent()?;
+    let siblings = sorted_child_dirs(grandparent, opts);
+    let idx = siblings.iter().position(|d| d == parent)?;
+
+    for sibling in siblings[..idx].iter().rev() {
+        if let Some(dir) = last_image_dir_in_subtree(sibling, 0, opts) {
+            return Some(dir);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vmv-file-list-{label}-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"test").unwrap();
+    }
 
     #[test]
     fn test_is_supported_image() {
@@ -458,21 +562,17 @@ mod tests {
     fn test_natural_sort_basic_numbers() {
         let mut names = vec!["file10.jpg", "file2.jpg", "file1.jpg", "file20.jpg"];
         names.sort_by(|a, b| natord::compare_ignore_case(a, b));
-        assert_eq!(names, vec!["file1.jpg", "file2.jpg", "file10.jpg", "file20.jpg"]);
+        assert_eq!(
+            names,
+            vec!["file1.jpg", "file2.jpg", "file10.jpg", "file20.jpg"]
+        );
     }
 
     #[test]
     fn test_natural_sort_parenthesized_numbers() {
-        let mut names = vec![
-            "image(10).jpg",
-            "image(2).jpg",
-            "image(1).jpg",
-        ];
+        let mut names = vec!["image(10).jpg", "image(2).jpg", "image(1).jpg"];
         names.sort_by(|a, b| natord::compare_ignore_case(a, b));
-        assert_eq!(
-            names,
-            vec!["image(1).jpg", "image(2).jpg", "image(10).jpg"]
-        );
+        assert_eq!(names, vec!["image(1).jpg", "image(2).jpg", "image(10).jpg"]);
     }
 
     #[test]
@@ -480,5 +580,63 @@ mod tests {
         let mut names = vec!["vol2ch10.jpg", "vol2ch2.jpg", "vol1ch10.jpg"];
         names.sort_by(|a, b| natord::compare_ignore_case(a, b));
         assert_eq!(names, vec!["vol1ch10.jpg", "vol2ch2.jpg", "vol2ch10.jpg"]);
+    }
+
+    #[test]
+    fn test_advance_clamped_with_edge_loop() {
+        let dir = unique_temp_dir("page-skip");
+        for idx in 0..10 {
+            touch(&dir.join(format!("image{idx}.jpg")));
+        }
+
+        let mut fl = FileList::from_directory(&dir);
+        fl.set_current(&dir.join("image2.jpg"));
+        assert!(fl.advance_clamped_with_edge_loop(5));
+        assert_eq!(fl.current_path(), Some(dir.join("image7.jpg").as_path()));
+
+        fl.set_current(&dir.join("image8.jpg"));
+        assert!(fl.advance_clamped_with_edge_loop(5));
+        assert_eq!(fl.current_path(), Some(dir.join("image9.jpg").as_path()));
+
+        assert!(fl.advance_clamped_with_edge_loop(5));
+        assert_eq!(fl.current_path(), Some(dir.join("image0.jpg").as_path()));
+
+        assert!(fl.advance_clamped_with_edge_loop(-5));
+        assert_eq!(fl.current_path(), Some(dir.join("image9.jpg").as_path()));
+    }
+
+    #[test]
+    fn test_grandparent_sibling_branch_navigation() {
+        let root = unique_temp_dir("branch-nav");
+
+        touch(&root.join("alpha/one/a.jpg"));
+        touch(&root.join("alpha/two/b.jpg"));
+        touch(&root.join("beta/x/c.jpg"));
+        touch(&root.join("beta/y/d.jpg"));
+        touch(&root.join("gamma/solo/e.jpg"));
+
+        let mut fl = FileList::from_directory(&root.join("alpha/two"));
+        fl.set_current(&root.join("alpha/two/b.jpg"));
+
+        assert_eq!(
+            fl.next_grandparent_sibling_branch(),
+            Some(root.join("beta/x"))
+        );
+
+        let mut beta_fl = FileList::from_directory(&root.join("beta/x"));
+        beta_fl.set_current(&root.join("beta/x/c.jpg"));
+
+        assert_eq!(
+            beta_fl.prev_grandparent_sibling_branch(),
+            Some(root.join("alpha/two"))
+        );
+        assert_eq!(
+            beta_fl.next_grandparent_sibling_branch(),
+            Some(root.join("gamma/solo"))
+        );
+
+        let mut gamma_fl = FileList::from_directory(&root.join("gamma/solo"));
+        gamma_fl.set_current(&root.join("gamma/solo/e.jpg"));
+        assert_eq!(gamma_fl.next_grandparent_sibling_branch(), None);
     }
 }

@@ -15,12 +15,9 @@ pub fn decode_with_wic(path: &Path) -> Result<egui::ColorImage, String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-        let factory: IWICImagingFactory = CoCreateInstance(
-            &CLSID_WICImagingFactory,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-        .map_err(|e| format!("Failed to create WIC factory: {}", e))?;
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("Failed to create WIC factory: {}", e))?;
 
         let path_str = path.to_string_lossy();
         let wide_path = HSTRING::from(path_str.as_ref());

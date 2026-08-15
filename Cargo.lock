@@ -3745,6 +3745,7 @@ dependencies = [
  "image",
  "log",
  "natord",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "turbojpeg",

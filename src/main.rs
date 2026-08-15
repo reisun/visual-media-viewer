@@ -32,23 +32,33 @@ fn configure_fonts(ctx: &egui::Context) {
     ];
     for path in &primary_paths {
         if let Some(fd) = load_font(path, 1.0, 0.0) {
-            fonts.font_data.insert("cjk_primary".to_owned(), std::sync::Arc::new(fd));
-            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+            fonts
+                .font_data
+                .insert("cjk_primary".to_owned(), std::sync::Arc::new(fd));
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
                 .insert(0, "cjk_primary".to_owned());
-            fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap()
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Monospace)
+                .unwrap()
                 .push("cjk_primary".to_owned());
             break;
         }
     }
 
-    let fallback_paths = [
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/msjh.ttc",
-    ];
+    let fallback_paths = ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msjh.ttc"];
     for path in &fallback_paths {
         if let Some(fd) = load_font(path, 1.0, 0.0) {
-            fonts.font_data.insert("cjk_fallback".to_owned(), std::sync::Arc::new(fd));
-            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+            fonts
+                .font_data
+                .insert("cjk_fallback".to_owned(), std::sync::Arc::new(fd));
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
                 .push("cjk_fallback".to_owned());
             break;
         }
@@ -70,7 +80,11 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 fn setup_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let msg = format!("{}\n\n{:?}", info, std::backtrace::Backtrace::force_capture());
+        let msg = format!(
+            "{}\n\n{:?}",
+            info,
+            std::backtrace::Backtrace::force_capture()
+        );
         let log_path = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("crash.log")))
@@ -89,7 +103,14 @@ fn setup_file_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(move |buf, record| {
             let ts = buf.timestamp_millis();
-            writeln!(buf, "[{} {} {}] {}", ts, record.level(), record.target(), record.args())
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                ts,
+                record.level(),
+                record.target(),
+                record.args()
+            )
         })
         .target(if file.is_some() {
             env_logger::Target::Pipe(Box::new(
