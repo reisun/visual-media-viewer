@@ -2,6 +2,7 @@
 
 mod cache;
 mod file_list;
+mod folder_ops;
 mod image_decode;
 mod ipc;
 mod settings;

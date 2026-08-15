@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::cache::ImageCache;
 use crate::file_list::{self, FileList, GroupBy, SortKey, SortOrder};
+use crate::folder_ops::{self, FolderDeleteRequest};
 use crate::image_decode::{self, DecodedImage};
 use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
 use crate::video_player::{PlaybackState, VideoPlayer};
@@ -171,6 +172,12 @@ fn build_title_path(title_root: &Path, current_dir: &Path, filename: &str) -> St
     }
 }
 
+#[derive(Debug, Clone)]
+struct DialogMessage {
+    title: String,
+    body: String,
+}
+
 pub struct ViewerApp {
     image_size: Option<[usize; 2]>,
     file_list: Option<FileList>,
@@ -195,6 +202,8 @@ pub struct ViewerApp {
     render_state: Arc<eframe::egui_wgpu::RenderState>,
     ipc_rx: mpsc::Receiver<PathBuf>,
     texture_cache: HashMap<PathBuf, TextureEntry>,
+    pending_folder_delete: Option<FolderDeleteRequest>,
+    dialog_message: Option<DialogMessage>,
 }
 
 impl ViewerApp {
@@ -238,6 +247,8 @@ impl ViewerApp {
             render_state,
             ipc_rx,
             texture_cache: HashMap::new(),
+            pending_folder_delete: None,
+            dialog_message: None,
         };
 
         if let Some(path) = initial_path {
@@ -492,6 +503,13 @@ impl ViewerApp {
             .file_list
             .as_ref()
             .map(|fl| fl.directory().to_path_buf());
+    }
+
+    fn set_dialog_message(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        self.dialog_message = Some(DialogMessage {
+            title: title.into(),
+            body: body.into(),
+        });
     }
 
     fn maybe_reset_slideshow_timer(&mut self, now: f64) {
@@ -765,9 +783,12 @@ impl ViewerApp {
         }
     }
 
-    fn navigate_prev_grandparent_branch(&mut self) {
+    fn navigate_prev_folder_unit(&mut self) {
         let dir = match &self.file_list {
-            Some(fl) => fl.prev_grandparent_sibling_branch(),
+            Some(fl) => match self.title_root.as_deref() {
+                Some(root) => fl.prev_folder_unit_within(root),
+                None => fl.prev_image_dir(),
+            },
             None => None,
         };
         if let Some(d) = dir {
@@ -775,13 +796,54 @@ impl ViewerApp {
         }
     }
 
-    fn navigate_next_grandparent_branch(&mut self) {
+    fn navigate_next_folder_unit(&mut self) {
         let dir = match &self.file_list {
-            Some(fl) => fl.next_grandparent_sibling_branch(),
+            Some(fl) => match self.title_root.as_deref() {
+                Some(root) => fl.next_folder_unit_within(root),
+                None => fl.next_image_dir(),
+            },
             None => None,
         };
         if let Some(d) = dir {
             self.open_directory(&d);
+        }
+    }
+
+    fn request_delete_current_folder(&mut self) {
+        let Some(fl) = self.file_list.as_ref() else {
+            return;
+        };
+        let Some(current_file) = fl.current_path().map(|path| path.to_path_buf()) else {
+            return;
+        };
+
+        match folder_ops::prepare_folder_delete_request(
+            &current_file,
+            fl.next_image_dir_after_current_subtree(),
+        ) {
+            Ok(request) => {
+                self.pending_folder_delete = Some(request);
+            }
+            Err(err) => {
+                self.set_dialog_message("削除できません", err);
+            }
+        }
+    }
+
+    fn confirm_delete_current_folder(&mut self) {
+        let Some(request) = self.pending_folder_delete.clone() else {
+            return;
+        };
+
+        match folder_ops::move_folder_to_recycle_bin(&request.target_dir) {
+            Ok(()) => {
+                self.pending_folder_delete = None;
+                self.open_directory(&request.next_dir);
+            }
+            Err(err) => {
+                self.pending_folder_delete = None;
+                self.set_dialog_message("削除に失敗しました", err);
+            }
         }
     }
 
@@ -1157,6 +1219,77 @@ impl ViewerApp {
             }
         }
     }
+
+    fn draw_folder_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(request) = self.pending_folder_delete.clone() else {
+            return;
+        };
+
+        let mut cancel = false;
+        let mut confirm = false;
+
+        egui::Window::new("delete_folder_confirm")
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label("現在のファイルの親フォルダを Windows のごみ箱へ移動します。");
+                ui.add_space(6.0);
+                ui.label(format!("対象: {}", request.target_dir.display()));
+                ui.label(format!("削除後の移動先: {}", request.next_dir.display()));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("キャンセル").clicked() {
+                        cancel = true;
+                    }
+                    if ui
+                        .button(format!("「{}」を削除", request.target_name()))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+
+        if cancel {
+            self.pending_folder_delete = None;
+        } else if confirm {
+            self.confirm_delete_current_folder();
+        }
+    }
+
+    fn draw_dialog_message(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.dialog_message.clone() else {
+            return;
+        };
+
+        let mut close = false;
+        egui::Window::new(message.title.as_str())
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(message.body);
+                ui.add_space(10.0);
+                if ui.button("OK").clicked() {
+                    close = true;
+                }
+            });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
+            close = true;
+        }
+
+        if close {
+            self.dialog_message = None;
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1303,48 +1436,56 @@ impl eframe::App for ViewerApp {
         }
 
         {
+            let modal_open = self.pending_folder_delete.is_some() || self.dialog_message.is_some();
             let is_video = self.video_player.is_some();
-            let nav = ctx.input(|i| {
-                let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
-                let shift = i.modifiers.shift;
-                if i.key_pressed(egui::Key::ArrowRight) {
-                    if is_video && !ctrl {
-                        return Some("video_skip_forward");
-                    }
-                    return Some("right");
-                }
-                if i.key_pressed(egui::Key::ArrowLeft) {
-                    if is_video && !ctrl {
-                        return Some("video_skip_backward");
-                    }
-                    return Some("left");
-                }
-                if i.key_pressed(egui::Key::PageUp) {
-                    if is_video {
-                        return Some("video_skip_back_5min");
-                    }
-                    return Some("page_back_5");
-                }
-                if i.key_pressed(egui::Key::PageDown) {
-                    if is_video {
-                        return Some("video_skip_fwd_5min");
-                    }
-                    return Some("page_forward_5");
-                }
-                if i.key_pressed(egui::Key::ArrowUp) {
-                    if shift {
-                        return Some("prev_branch");
-                    }
-                    return Some("prev_folder");
-                }
-                if i.key_pressed(egui::Key::ArrowDown) {
-                    if shift {
-                        return Some("next_branch");
-                    }
-                    return Some("next_folder");
-                }
+            let nav = if modal_open {
                 None
-            });
+            } else {
+                ctx.input(|i| {
+                    let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
+                    let shift = i.modifiers.shift;
+                    if i.key_pressed(egui::Key::ArrowRight) {
+                        if is_video && !ctrl {
+                            return Some("video_skip_forward");
+                        }
+                        return Some("right");
+                    }
+                    if i.key_pressed(egui::Key::ArrowLeft) {
+                        if is_video && !ctrl {
+                            return Some("video_skip_backward");
+                        }
+                        return Some("left");
+                    }
+                    if i.key_pressed(egui::Key::PageUp) {
+                        if is_video {
+                            return Some("video_skip_back_5min");
+                        }
+                        return Some("page_back_5");
+                    }
+                    if i.key_pressed(egui::Key::PageDown) {
+                        if is_video {
+                            return Some("video_skip_fwd_5min");
+                        }
+                        return Some("page_forward_5");
+                    }
+                    if i.key_pressed(egui::Key::ArrowUp) {
+                        if shift {
+                            return Some("prev_branch");
+                        }
+                        return Some("prev_folder");
+                    }
+                    if i.key_pressed(egui::Key::ArrowDown) {
+                        if shift {
+                            return Some("next_branch");
+                        }
+                        return Some("next_folder");
+                    }
+                    if i.key_pressed(egui::Key::Delete) {
+                        return Some("delete_folder");
+                    }
+                    None
+                })
+            };
             match nav {
                 Some("video_skip_forward") => {
                     self.video_seek_clamped(5.0);
@@ -1364,20 +1505,25 @@ impl eframe::App for ViewerApp {
                 Some("page_forward_5") => self.skip_files_by_page(5),
                 Some("prev_folder") => self.navigate_prev_folder(),
                 Some("next_folder") => self.navigate_next_folder(),
-                Some("prev_branch") => self.navigate_prev_grandparent_branch(),
-                Some("next_branch") => self.navigate_next_grandparent_branch(),
+                Some("prev_branch") => self.navigate_prev_folder_unit(),
+                Some("next_branch") => self.navigate_next_folder_unit(),
+                Some("delete_folder") => self.request_delete_current_folder(),
                 _ => {}
             }
 
-            let rotate = ctx.input(|i| {
-                if i.key_pressed(egui::Key::R) {
-                    if i.modifiers.shift {
-                        return Some(false); // CCW
-                    }
-                    return Some(true); // CW
-                }
+            let rotate = if modal_open {
                 None
-            });
+            } else {
+                ctx.input(|i| {
+                    if i.key_pressed(egui::Key::R) {
+                        if i.modifiers.shift {
+                            return Some(false); // CCW
+                        }
+                        return Some(true); // CW
+                    }
+                    None
+                })
+            };
             if let Some(cw) = rotate {
                 if cw {
                     self.transform.rotate_cw();
@@ -1387,49 +1533,57 @@ impl eframe::App for ViewerApp {
                 self.save_settings();
             }
 
-            let slideshow_key_action = ctx.input(|i| {
-                if i.key_pressed(egui::Key::S) {
-                    if i.modifiers.shift {
-                        return Some(false);
-                    }
-                    return Some(true);
-                }
+            let slideshow_key_action = if modal_open {
                 None
-            });
+            } else {
+                ctx.input(|i| {
+                    if i.key_pressed(egui::Key::S) {
+                        if i.modifiers.shift {
+                            return Some(false);
+                        }
+                        return Some(true);
+                    }
+                    None
+                })
+            };
             if let Some(active) = slideshow_key_action {
                 self.set_slideshow_active(active, ctx.input(|i| i.time));
             }
 
-            let interval_change = ctx.input(|i| {
-                if i.key_pressed(egui::Key::D) && i.key_down(egui::Key::S) {
-                    return Some(0.1_f64);
-                }
-                if i.key_pressed(egui::Key::F) && i.key_down(egui::Key::S) {
-                    return Some(-0.1_f64);
-                }
-                if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
-                    return Some(0.1_f64);
-                }
-                if i.key_pressed(egui::Key::Minus) {
-                    return Some(-0.1_f64);
-                }
+            let interval_change = if modal_open {
                 None
-            });
+            } else {
+                ctx.input(|i| {
+                    if i.key_pressed(egui::Key::D) && i.key_down(egui::Key::S) {
+                        return Some(0.1_f64);
+                    }
+                    if i.key_pressed(egui::Key::F) && i.key_down(egui::Key::S) {
+                        return Some(-0.1_f64);
+                    }
+                    if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                        return Some(0.1_f64);
+                    }
+                    if i.key_pressed(egui::Key::Minus) {
+                        return Some(-0.1_f64);
+                    }
+                    None
+                })
+            };
             if let Some(delta) = interval_change {
                 self.adjust_slideshow_interval(delta);
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if !modal_open && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
                 if let Some(player) = &mut self.video_player {
                     player.toggle_pause();
                 }
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+            if !modal_open && ctx.input(|i| i.key_pressed(egui::Key::N)) {
                 self.set_title_root_to_current_parent();
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+            if !modal_open && ctx.input(|i| i.key_pressed(egui::Key::F12)) {
                 self.dump_diagnostics();
             }
         }
@@ -1526,6 +1680,9 @@ impl eframe::App for ViewerApp {
                     });
                 }
             });
+
+        self.draw_folder_delete_dialog(ctx);
+        self.draw_dialog_message(ctx);
     }
 }
 

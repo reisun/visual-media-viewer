@@ -313,6 +313,7 @@ impl FileList {
         prev_image_dir_from(&self.directory, &opts)
     }
 
+    #[cfg(test)]
     pub fn next_grandparent_sibling_branch(&self) -> Option<PathBuf> {
         let opts = DirSortOpts {
             sort_key: self.sort_key,
@@ -322,6 +323,7 @@ impl FileList {
         next_grandparent_sibling_branch_from(&self.directory, &opts)
     }
 
+    #[cfg(test)]
     pub fn prev_grandparent_sibling_branch(&self) -> Option<PathBuf> {
         let opts = DirSortOpts {
             sort_key: self.sort_key,
@@ -329,6 +331,33 @@ impl FileList {
             group_by: self.group_by,
         };
         prev_grandparent_sibling_branch_from(&self.directory, &opts)
+    }
+
+    pub fn next_folder_unit_within(&self, title_root: &Path) -> Option<PathBuf> {
+        let opts = DirSortOpts {
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            group_by: self.group_by,
+        };
+        next_folder_unit_from(&self.directory, title_root, &opts)
+    }
+
+    pub fn prev_folder_unit_within(&self, title_root: &Path) -> Option<PathBuf> {
+        let opts = DirSortOpts {
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            group_by: self.group_by,
+        };
+        prev_folder_unit_from(&self.directory, title_root, &opts)
+    }
+
+    pub fn next_image_dir_after_current_subtree(&self) -> Option<PathBuf> {
+        let opts = DirSortOpts {
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            group_by: self.group_by,
+        };
+        next_image_dir_after_subtree_from(&self.directory, &opts)
     }
 }
 
@@ -428,6 +457,10 @@ fn next_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     if let Some(child) = first_image_dir_under(current, 0, opts) {
         return Some(child);
     }
+    next_image_dir_after_subtree_from(current, opts)
+}
+
+fn next_image_dir_after_subtree_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     let mut dir = current.to_path_buf();
     for _ in 0..MAX_DEPTH {
         let parent = dir.parent()?;
@@ -473,6 +506,7 @@ fn prev_image_dir_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
 fn next_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     let parent = current.parent()?;
     let grandparent = parent.parent()?;
@@ -488,6 +522,7 @@ fn next_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> O
     None
 }
 
+#[cfg(test)]
 fn prev_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
     let parent = current.parent()?;
     let grandparent = parent.parent()?;
@@ -500,6 +535,48 @@ fn prev_grandparent_sibling_branch_from(current: &Path, opts: &DirSortOpts) -> O
         }
     }
 
+    None
+}
+
+fn folder_unit_anchor(current: &Path, title_root: &Path) -> Option<PathBuf> {
+    if current == title_root {
+        return None;
+    }
+
+    let mut relative = current.strip_prefix(title_root).ok()?.components();
+    let first = relative.next()?;
+    Some(title_root.join(first.as_os_str()))
+}
+
+fn next_folder_unit_from(current: &Path, title_root: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
+    let unit = match folder_unit_anchor(current, title_root) {
+        Some(unit) => unit,
+        None => return next_image_dir_from(current, opts),
+    };
+
+    let siblings = sorted_child_dirs(title_root, opts);
+    let idx = siblings.iter().position(|dir| dir == &unit)?;
+    for sibling in &siblings[idx + 1..] {
+        if let Some(dir) = first_image_dir_in_branch(sibling, opts) {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+fn prev_folder_unit_from(current: &Path, title_root: &Path, opts: &DirSortOpts) -> Option<PathBuf> {
+    let unit = match folder_unit_anchor(current, title_root) {
+        Some(unit) => unit,
+        None => return prev_image_dir_from(current, opts),
+    };
+
+    let siblings = sorted_child_dirs(title_root, opts);
+    let idx = siblings.iter().position(|dir| dir == &unit)?;
+    for sibling in siblings[..idx].iter().rev() {
+        if let Some(dir) = last_image_dir_in_subtree(sibling, 0, opts) {
+            return Some(dir);
+        }
+    }
     None
 }
 
@@ -638,5 +715,108 @@ mod tests {
         let mut gamma_fl = FileList::from_directory(&root.join("gamma/solo"));
         gamma_fl.set_current(&root.join("gamma/solo/e.jpg"));
         assert_eq!(gamma_fl.next_grandparent_sibling_branch(), None);
+    }
+
+    #[test]
+    fn test_folder_unit_navigation_matches_normal_when_title_root_is_current_dir() {
+        let root = unique_temp_dir("folder-unit-initial");
+
+        touch(&root.join("alpha/one/a.jpg"));
+        touch(&root.join("alpha/two/b.jpg"));
+        touch(&root.join("beta/x/c.jpg"));
+
+        let mut fl = FileList::from_directory(&root.join("alpha/two"));
+        fl.set_current(&root.join("alpha/two/b.jpg"));
+
+        assert_eq!(
+            fl.next_folder_unit_within(&root.join("alpha/two")),
+            fl.next_image_dir()
+        );
+        assert_eq!(
+            fl.prev_folder_unit_within(&root.join("alpha/two")),
+            fl.prev_image_dir()
+        );
+    }
+
+    #[test]
+    fn test_folder_unit_navigation_uses_title_root_scope_when_broadened() {
+        let root = unique_temp_dir("folder-unit-root");
+
+        touch(&root.join("series/vol01/ch01/a.jpg"));
+        touch(&root.join("series/vol01/ch02/b.jpg"));
+        touch(&root.join("series/vol02/ch03/c.jpg"));
+        touch(&root.join("series/vol03/ch04/d.jpg"));
+
+        let mut vol01 = FileList::from_directory(&root.join("series/vol01/ch02"));
+        vol01.set_current(&root.join("series/vol01/ch02/b.jpg"));
+        assert_eq!(
+            vol01.next_folder_unit_within(&root.join("series")),
+            Some(root.join("series/vol02/ch03"))
+        );
+        assert_eq!(vol01.prev_folder_unit_within(&root.join("series")), None);
+
+        let mut vol02 = FileList::from_directory(&root.join("series/vol02/ch03"));
+        vol02.set_current(&root.join("series/vol02/ch03/c.jpg"));
+        assert_eq!(
+            vol02.prev_folder_unit_within(&root.join("series")),
+            Some(root.join("series/vol01/ch02"))
+        );
+        assert_eq!(
+            vol02.next_folder_unit_within(&root.join("series")),
+            Some(root.join("series/vol03/ch04"))
+        );
+    }
+
+    #[test]
+    fn test_folder_unit_navigation_never_escapes_broadened_root() {
+        let root = unique_temp_dir("folder-unit-boundary");
+
+        touch(&root.join("collection/vol01/ch01/a.jpg"));
+        touch(&root.join("collection/vol02/ch02/b.jpg"));
+        touch(&root.join("outside/vol99/c.jpg"));
+
+        let mut fl = FileList::from_directory(&root.join("collection/vol02/ch02"));
+        fl.set_current(&root.join("collection/vol02/ch02/b.jpg"));
+
+        assert_eq!(fl.next_folder_unit_within(&root.join("collection")), None);
+        assert_eq!(
+            fl.prev_folder_unit_within(&root.join("collection")),
+            Some(root.join("collection/vol01/ch01"))
+        );
+    }
+
+    #[test]
+    fn test_delete_navigation_skips_current_subtree_children() {
+        let root = unique_temp_dir("delete-next-skip-subtree");
+
+        touch(&root.join("alpha/current/a.jpg"));
+        touch(&root.join("alpha/current/nested/b.jpg"));
+        touch(&root.join("alpha/next/c.jpg"));
+        touch(&root.join("beta/final/d.jpg"));
+
+        let mut fl = FileList::from_directory(&root.join("alpha/current"));
+        fl.set_current(&root.join("alpha/current/a.jpg"));
+
+        assert_eq!(fl.next_image_dir(), Some(root.join("alpha/current/nested")));
+        assert_eq!(
+            fl.next_image_dir_after_current_subtree(),
+            Some(root.join("alpha/next"))
+        );
+    }
+
+    #[test]
+    fn test_delete_navigation_climbs_to_next_branch_after_subtree() {
+        let root = unique_temp_dir("delete-next-climb");
+
+        touch(&root.join("alpha/current/a.jpg"));
+        touch(&root.join("beta/next/b.jpg"));
+
+        let mut fl = FileList::from_directory(&root.join("alpha/current"));
+        fl.set_current(&root.join("alpha/current/a.jpg"));
+
+        assert_eq!(
+            fl.next_image_dir_after_current_subtree(),
+            Some(root.join("beta/next"))
+        );
     }
 }
