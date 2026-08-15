@@ -68,6 +68,30 @@ fn is_same_or_descendant(path: &Path, base: &Path) -> bool {
     path == base || path.starts_with(base)
 }
 
+fn strip_verbatim_prefix_wide(path: &[u16]) -> Vec<u16> {
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC_PREFIX: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+
+    if let Some(rest) = path.strip_prefix(VERBATIM_UNC_PREFIX) {
+        let mut shell_path = vec![b'\\' as u16, b'\\' as u16];
+        shell_path.extend_from_slice(rest);
+        shell_path
+    } else if let Some(rest) = path.strip_prefix(VERBATIM_PREFIX) {
+        rest.to_vec()
+    } else {
+        path.to_vec()
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn move_folder_to_recycle_bin(target_dir: &Path) -> Result<(), String> {
     validate_delete_target(target_dir)?;
@@ -108,7 +132,11 @@ fn move_folder_to_recycle_bin_windows(target_dir: &Path) -> Result<(), String> {
         fn SHFileOperationW(file_op: *mut ShFileOpStructW) -> i32;
     }
 
-    let mut wide_path: Vec<u16> = target_dir.as_os_str().encode_wide().collect();
+    // `canonicalize` returns a verbatim (`\\?\`) path on Windows, but
+    // SHFileOperation rejects that prefix. Keep the path fully qualified while
+    // converting it back to the Win32 shell form immediately before the call.
+    let encoded_path: Vec<u16> = target_dir.as_os_str().encode_wide().collect();
+    let mut wide_path = strip_verbatim_prefix_wide(&encoded_path);
     wide_path.push(0);
     wide_path.push(0);
 
@@ -207,5 +235,28 @@ mod tests {
 
         let err = move_folder_to_recycle_bin(&root).unwrap_err();
         assert!(err.contains("ルート"));
+    }
+
+    #[test]
+    fn test_strip_verbatim_drive_prefix_for_shell_api() {
+        let input: Vec<u16> = r"\\?\C:\gallery\set01".encode_utf16().collect();
+        let expected: Vec<u16> = r"C:\gallery\set01".encode_utf16().collect();
+
+        assert_eq!(strip_verbatim_prefix_wide(&input), expected);
+    }
+
+    #[test]
+    fn test_strip_verbatim_unc_prefix_for_shell_api() {
+        let input: Vec<u16> = r"\\?\UNC\server\share\set01".encode_utf16().collect();
+        let expected: Vec<u16> = r"\\server\share\set01".encode_utf16().collect();
+
+        assert_eq!(strip_verbatim_prefix_wide(&input), expected);
+    }
+
+    #[test]
+    fn test_preserve_regular_shell_path() {
+        let input: Vec<u16> = r"C:\gallery\set01".encode_utf16().collect();
+
+        assert_eq!(strip_verbatim_prefix_wide(&input), input);
     }
 }
