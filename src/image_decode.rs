@@ -33,13 +33,14 @@ impl DecodedImage {
     }
 
     fn load_jpeg_scaled(path: &Path, max_dim: u32) -> Result<Self, String> {
-        let jpeg_data = std::fs::read(path)
-            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let jpeg_data =
+            std::fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-        let mut decompressor = turbojpeg::Decompressor::new()
-            .map_err(|e| format!("turbojpeg init: {}", e))?;
+        let mut decompressor =
+            turbojpeg::Decompressor::new().map_err(|e| format!("turbojpeg init: {}", e))?;
 
-        let header = decompressor.read_header(&jpeg_data)
+        let header = decompressor
+            .read_header(&jpeg_data)
             .map_err(|e| format!("JPEG header: {}", e))?;
 
         let orig_w = header.width;
@@ -62,17 +63,20 @@ impl DecodedImage {
             format: turbojpeg::PixelFormat::RGBA,
         };
 
-        decompressor.decompress(&jpeg_data, image)
+        decompressor
+            .decompress(&jpeg_data, image)
             .map_err(|e| format!("JPEG scaled decode: {}", e))?;
 
         let size = [out_w, out_h];
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-        Ok(Self { pixels: color_image })
+        Ok(Self {
+            pixels: color_image,
+        })
     }
 
     fn load_image_crate(path: &Path) -> Result<Self, String> {
-        let file = File::open(path)
-            .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let file =
+            File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
         let reader = image::ImageReader::new(BufReader::new(file))
             .with_guessed_format()
             .map_err(|e| format!("Failed to detect format {}: {}", path.display(), e))?;
@@ -199,7 +203,11 @@ fn get_mipmap_pipeline(device: &wgpu::Device) -> &'static MipmapPipeline {
             ..Default::default()
         });
 
-        MipmapPipeline { pipeline, sampler, bind_group_layout }
+        MipmapPipeline {
+            pipeline,
+            sampler,
+            bind_group_layout,
+        }
     })
 }
 
@@ -394,10 +402,26 @@ pub fn paint_textured_rect(
 ) {
     let tint = egui::Color32::WHITE;
     let mut mesh = egui::Mesh::with_texture(tex_id);
-    mesh.vertices.push(egui::epaint::Vertex { pos: rect.left_top(), uv: uvs[0], color: tint });
-    mesh.vertices.push(egui::epaint::Vertex { pos: rect.right_top(), uv: uvs[1], color: tint });
-    mesh.vertices.push(egui::epaint::Vertex { pos: rect.right_bottom(), uv: uvs[2], color: tint });
-    mesh.vertices.push(egui::epaint::Vertex { pos: rect.left_bottom(), uv: uvs[3], color: tint });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_top(),
+        uv: uvs[0],
+        color: tint,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_top(),
+        uv: uvs[1],
+        color: tint,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_bottom(),
+        uv: uvs[2],
+        color: tint,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_bottom(),
+        uv: uvs[3],
+        color: tint,
+    });
     mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     painter.add(egui::Shape::mesh(mesh));
 }

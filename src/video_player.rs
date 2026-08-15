@@ -277,10 +277,10 @@ impl VideoPlayer {
         let mut video_decoder_ctx =
             ffmpeg_next::codec::context::Context::from_parameters(video_codec_par)
                 .map_err(|e| format!("Video codec ctx: {}", e))?;
-        video_decoder_ctx.set_threading(ffmpeg_next::threading::Config {
-            kind: ffmpeg_next::threading::Type::Frame,
-            count: 0,
-        });
+        let mut thread_config = ffmpeg_next::threading::Config::default();
+        thread_config.kind = ffmpeg_next::threading::Type::Frame;
+        thread_config.count = 0;
+        video_decoder_ctx.set_threading(thread_config);
         let video_decoder = video_decoder_ctx
             .decoder()
             .video()
@@ -799,7 +799,11 @@ fn build_audio_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
                                 buf_pos = 0;
                                 if normalize.load(Ordering::Relaxed) {
                                     let peak = buffer.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-                                    norm_gain = if peak > 0.001 { (1.0 / peak).min(10.0) } else { 1.0 };
+                                    norm_gain = if peak > 0.001 {
+                                        (1.0 / peak).min(10.0)
+                                    } else {
+                                        1.0
+                                    };
                                 } else {
                                     norm_gain = 1.0;
                                 }
@@ -1199,7 +1203,11 @@ fn video_decoder_loop(
                 out_h = fh;
                 log::info!(
                     "[video] creating scaler: {:?} {}x{} -> RGBA {}x{}",
-                    decoded_frame.format(), actual_w, actual_h, out_w, out_h
+                    decoded_frame.format(),
+                    actual_w,
+                    actual_h,
+                    out_w,
+                    out_h
                 );
                 match ffmpeg_next::software::scaling::Context::get(
                     decoded_frame.format(),
@@ -1220,7 +1228,12 @@ fn video_decoder_loop(
                     }
                 }
             }
-            if scaler.as_mut().unwrap().run(&decoded_frame, &mut rgba_frame).is_err() {
+            if scaler
+                .as_mut()
+                .unwrap()
+                .run(&decoded_frame, &mut rgba_frame)
+                .is_err()
+            {
                 continue;
             }
             let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);

@@ -49,6 +49,8 @@ pub struct Settings {
     pub maximized: bool,
     #[serde(default)]
     pub normalize_audio: bool,
+    #[serde(default = "default_slideshow_interval_secs")]
+    pub slideshow_interval_secs: f64,
 }
 
 fn default_volume() -> u16 {
@@ -67,6 +69,10 @@ fn default_window_height() -> f32 {
     720.0
 }
 
+fn default_slideshow_interval_secs() -> f64 {
+    3.0
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -83,6 +89,7 @@ impl Default for Settings {
             window_height: 720.0,
             maximized: false,
             normalize_audio: false,
+            slideshow_interval_secs: default_slideshow_interval_secs(),
         }
     }
 }
