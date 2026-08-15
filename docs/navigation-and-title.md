@@ -17,8 +17,16 @@ This document describes the confirmed keyboard, slideshow, and title-bar behavio
 - `↑` / `↓`
   - Move to previous / next image directory using existing directory traversal
 - `Shift+↑` / `Shift+↓`
-  - Move to the previous / next sibling branch of the current directory's parent
+  - Use the current `title_root` as the navigation scope
+  - When `title_root` is still the current directory, behave the same as `↑` / `↓`
+  - Once `title_root` broadens, move to the previous / next folder unit directly under that root
+  - Stay inside that `title_root` scope
   - No loop
+- `Delete`
+  - Open a confirmation dialog for the current file's parent folder
+  - Delete to Windows Recycle Bin only; never permanently delete
+  - Capture the next media directory after the current subtree before deleting, then open it only after recycle succeeds
+  - If validation fails, cancellation occurs, or recycle fails, keep the current display and show an error dialog
 
 ## Slideshow
 
@@ -42,6 +50,7 @@ This document describes the confirmed keyboard, slideshow, and title-bar behavio
   - `root-name/relative-child/file-name`
   - then the existing position and slideshow/video suffixes
 - `N` resets `title_root` to the current parent
+- `Shift+↑` / `Shift+↓` use this root to decide folder-unit boundaries
 
 ## Diagnostics and activation
 
