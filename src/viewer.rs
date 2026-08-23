@@ -835,6 +835,14 @@ impl ViewerApp {
             return;
         };
 
+        // FFmpeg keeps the current video open from its demuxer thread. Stop
+        // and join the playback session before asking Windows to recycle the
+        // containing folder so every file handle has been released.
+        let restart_video_on_failure = self.video_player.is_some();
+        if restart_video_on_failure {
+            self.stop_video();
+        }
+
         match folder_ops::move_folder_to_recycle_bin(&request.target_dir) {
             Ok(()) => {
                 self.pending_folder_delete = None;
@@ -842,6 +850,9 @@ impl ViewerApp {
             }
             Err(err) => {
                 self.pending_folder_delete = None;
+                if restart_video_on_failure {
+                    self.load_current_image();
+                }
                 self.set_dialog_message("削除に失敗しました", err);
             }
         }
