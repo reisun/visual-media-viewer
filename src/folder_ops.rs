@@ -68,7 +68,7 @@ fn is_same_or_descendant(path: &Path, base: &Path) -> bool {
     path == base || path.starts_with(base)
 }
 
-fn strip_verbatim_prefix_wide(path: &[u16]) -> Vec<u16> {
+fn shell_compatible_wide_path(path: &[u16]) -> Vec<u16> {
     const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
     const VERBATIM_UNC_PREFIX: &[u16] = &[
         b'\\' as u16,
@@ -106,59 +106,73 @@ pub fn move_folder_to_recycle_bin(target_dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn move_folder_to_recycle_bin_windows(target_dir: &Path) -> Result<(), String> {
-    use std::ffi::c_void;
+    let target_dir = target_dir.to_path_buf();
+    std::thread::spawn(move || move_folder_to_recycle_bin_sta(&target_dir))
+        .join()
+        .map_err(|_| "ごみ箱処理中に予期しないエラーが発生しました。".to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn move_folder_to_recycle_bin_sta(target_dir: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
-
-    const FO_DELETE: u32 = 0x0003;
-    const FOF_SILENT: u16 = 0x0004;
-    const FOF_NOCONFIRMATION: u16 = 0x0010;
-    const FOF_ALLOWUNDO: u16 = 0x0040;
-    const FOF_NOERRORUI: u16 = 0x0400;
-
-    #[repr(C)]
-    struct ShFileOpStructW {
-        hwnd: *mut c_void,
-        w_func: u32,
-        p_from: *const u16,
-        p_to: *const u16,
-        f_flags: u16,
-        f_any_operations_aborted: i32,
-        h_name_mappings: *mut c_void,
-        lpsz_progress_title: *const u16,
-    }
-
-    #[link(name = "shell32")]
-    extern "system" {
-        fn SHFileOperationW(file_op: *mut ShFileOpStructW) -> i32;
-    }
-
-    // `canonicalize` returns a verbatim (`\\?\`) path on Windows, but
-    // SHFileOperation rejects that prefix. Keep the path fully qualified while
-    // converting it back to the Win32 shell form immediately before the call.
-    let encoded_path: Vec<u16> = target_dir.as_os_str().encode_wide().collect();
-    let mut wide_path = strip_verbatim_prefix_wide(&encoded_path);
-    wide_path.push(0);
-    wide_path.push(0);
-
-    let mut operation = ShFileOpStructW {
-        hwnd: std::ptr::null_mut(),
-        w_func: FO_DELETE,
-        p_from: wide_path.as_ptr(),
-        p_to: std::ptr::null(),
-        f_flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT,
-        f_any_operations_aborted: 0,
-        h_name_mappings: std::ptr::null_mut(),
-        lpsz_progress_title: std::ptr::null(),
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
+        FOFX_RECYCLEONDELETE, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
     };
 
-    let result = unsafe { SHFileOperationW(&mut operation) };
-    if result != 0 {
-        return Err(format!(
-            "フォルダをごみ箱へ移動できませんでした (code {result})。"
-        ));
+    struct ComGuard;
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
     }
-    if operation.f_any_operations_aborted != 0 {
+
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|e| format!("ごみ箱処理を初期化できませんでした: {e}"))?;
+    let _com_guard = ComGuard;
+
+    // `canonicalize` returns a verbatim (`\\?\`) path on Windows. Shell item
+    // parsing rejects that prefix, so convert only the parsing input back to a
+    // regular absolute Win32 path. Keep `target_dir` canonical for validation.
+    let encoded_path: Vec<u16> = target_dir.as_os_str().encode_wide().collect();
+    let mut wide_path = shell_compatible_wide_path(&encoded_path);
+    wide_path.push(0);
+
+    let item: IShellItem = unsafe {
+        SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None)
+            .map_err(|e| format!("削除対象フォルダをシェルで開けませんでした: {e}"))?
+    };
+    let operation: IFileOperation = unsafe {
+        CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("ごみ箱処理を開始できませんでした: {e}"))?
+    };
+    unsafe {
+        operation
+            .SetOperationFlags(
+                FOFX_RECYCLEONDELETE | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT,
+            )
+            .map_err(|e| format!("ごみ箱処理を設定できませんでした: {e}"))?;
+        operation
+            .DeleteItem(&item, None)
+            .map_err(|e| format!("フォルダの削除を予約できませんでした: {e}"))?;
+        operation
+            .PerformOperations()
+            .map_err(|e| format!("フォルダをごみ箱へ移動できませんでした: {e}"))?;
+    }
+    let aborted = unsafe { operation.GetAnyOperationsAborted() }
+        .map_err(|e| format!("ごみ箱処理の完了状態を確認できませんでした: {e}"))?;
+    if aborted.as_bool() {
         return Err("フォルダ削除がキャンセルされました。".to_string());
+    }
+    if target_dir.exists() {
+        return Err("フォルダをごみ箱へ移動できませんでした。削除対象が残っています。".to_string());
     }
     Ok(())
 }
@@ -238,25 +252,25 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_verbatim_drive_prefix_for_shell_api() {
-        let input: Vec<u16> = r"\\?\C:\gallery\set01".encode_utf16().collect();
-        let expected: Vec<u16> = r"C:\gallery\set01".encode_utf16().collect();
+    fn test_shell_path_removes_verbatim_drive_prefix() {
+        let input: Vec<u16> = r"\\?\D:\gallery\set01".encode_utf16().collect();
+        let expected: Vec<u16> = r"D:\gallery\set01".encode_utf16().collect();
 
-        assert_eq!(strip_verbatim_prefix_wide(&input), expected);
+        assert_eq!(shell_compatible_wide_path(&input), expected);
     }
 
     #[test]
-    fn test_strip_verbatim_unc_prefix_for_shell_api() {
+    fn test_shell_path_converts_verbatim_unc_prefix() {
         let input: Vec<u16> = r"\\?\UNC\server\share\set01".encode_utf16().collect();
         let expected: Vec<u16> = r"\\server\share\set01".encode_utf16().collect();
 
-        assert_eq!(strip_verbatim_prefix_wide(&input), expected);
+        assert_eq!(shell_compatible_wide_path(&input), expected);
     }
 
     #[test]
-    fn test_preserve_regular_shell_path() {
-        let input: Vec<u16> = r"C:\gallery\set01".encode_utf16().collect();
+    fn test_shell_path_preserves_regular_absolute_path() {
+        let input: Vec<u16> = r"D:\gallery\set01".encode_utf16().collect();
 
-        assert_eq!(strip_verbatim_prefix_wide(&input), input);
+        assert_eq!(shell_compatible_wide_path(&input), input);
     }
 }
