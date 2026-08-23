@@ -1,6 +1,6 @@
 [package]
 name = "visual-media-viewer"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "High-performance image viewer powered by Rust + wgpu + egui"
 license = "MIT"
