@@ -588,6 +588,8 @@ impl VideoPlayer {
             if disconnected && self.prebuffer_queue.is_empty() {
                 log::error!("[poll_frame] decoder disconnected with empty prebuffer -> Finished");
                 self.state = PlaybackState::Finished;
+                self.awaiting_first_frame = false;
+                self.prebuffer_deadline = None;
                 return None;
             }
             if !self.prebuffer_queue.is_empty() {
@@ -685,7 +687,7 @@ impl VideoPlayer {
     }
 
     pub fn is_buffering(&self) -> bool {
-        self.awaiting_first_frame
+        matches!(self.state, PlaybackState::Playing) && self.awaiting_first_frame
     }
 
     pub fn current_pts(&self) -> f64 {
@@ -760,6 +762,8 @@ impl VideoPlayer {
     pub fn stop(&mut self) {
         drop(self.stop_session());
         self.state = PlaybackState::Finished;
+        self.awaiting_first_frame = false;
+        self.prebuffer_deadline = None;
     }
 }
 
@@ -1495,6 +1499,48 @@ mod tests {
         player.prebuffer_deadline = Some(Instant::now());
         assert_eq!(player.poll_frame_for_upload(0.0, None).unwrap().0, 1);
         assert!(player.poll_frame_for_upload(0.0, Some(1)).is_none());
+    }
+
+    #[test]
+    fn empty_decoder_eof_ends_buffering() {
+        let mut player = test_player();
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let (cmd_tx, _) = mpsc::channel();
+        drop(frame_tx);
+        player.session = Some(PlaybackSession {
+            frame_rx,
+            cmd_tx,
+            demuxer_thread: thread::spawn(|| None),
+            video_thread: thread::spawn(|| {}),
+            audio_stream: None,
+            audio_clock: Arc::new(AudioClock::new(2, 48000)),
+            audio_paused: Arc::new(AtomicBool::new(true)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        });
+        player.awaiting_first_frame = true;
+        player.prebuffer_deadline = Some(Instant::now() + Duration::from_secs(2));
+        assert!(player.is_buffering());
+        assert!(player.poll_frame(0.0).is_none());
+        assert!(matches!(player.state, PlaybackState::Finished));
+        assert!(!player.is_buffering());
+        assert!(!player.awaiting_first_frame);
+        assert!(player.prebuffer_deadline.is_none());
+    }
+
+    #[test]
+    fn stopped_or_paused_player_is_not_buffering() {
+        let mut player = test_player();
+        player.awaiting_first_frame = true;
+        assert!(player.is_buffering());
+        player.toggle_pause();
+        assert!(!player.is_buffering());
+        player.toggle_pause();
+        assert!(player.is_buffering());
+        player.stop();
+        assert!(!player.is_buffering());
+        assert!(!player.awaiting_first_frame);
+        player.awaiting_first_frame = true;
+        assert!(!player.is_buffering());
     }
 
     #[test]

@@ -12,6 +12,12 @@ Revisions survive seeks within one player. Destroying the video texture resets
 the viewer's upload tracking, including when changing files. Polling and the
 existing presentation clock continue even when no upload is needed.
 
+The buffering indicator is evaluated after polling and only while playback is
+playing and awaiting its first frame. Finishing without a decoded frame clears
+that wait state. Finished playback shows a stop square instead of a spinner;
+seeking past the end when no other file is available stops playback. Space or a
+valid seek can restart playback through the existing controls.
+
 ## Initial open
 
 Opening a video prepares the input and threaded video decoder once. Metadata
