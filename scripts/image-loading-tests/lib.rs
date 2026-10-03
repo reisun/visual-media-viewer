@@ -7,5 +7,9 @@ mod cache;
 mod file_list;
 #[path = "../../src/image_decode.rs"]
 mod image_decode;
+#[path = "../../src/media_overlay.rs"]
+mod media_overlay;
+#[path = "../../src/title_bar.rs"]
+mod title_bar;
 #[path = "../../src/wic_decoder.rs"]
 mod wic_decoder;

@@ -17,6 +17,10 @@ playing and awaiting its first frame. Finishing without a decoded frame clears
 that wait state. Finished playback shows a stop square instead of a spinner;
 seeking past the end when no other file is available stops playback. Space or a
 valid seek can restart playback through the existing controls.
+Loading and stopped indicators are overlays over the most recent video texture,
+with a small translucent backdrop. If no video frame has been displayed yet,
+the same indicator appears over the viewer background. Seeking keeps the last
+displayed texture visible while waiting for the replacement frame.
 
 ## Initial open
 

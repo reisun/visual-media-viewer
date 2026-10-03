@@ -51,6 +51,15 @@ This document describes the confirmed keyboard, slideshow, and title-bar behavio
   - then the existing position and slideshow/video suffixes
 - `N` resets `title_root` to the current parent
 - `Shift+↑` / `Shift+↓` use this root to decide folder-unit boundaries
+- Window controls occupy a reserved right-hand region. When the title fits,
+  metadata follows the path. Only while the path scrolls is metadata docked
+  immediately to the left of the controls. Its order is file position followed
+  by slideshow or playback information.
+- Only the path scrolls when it exceeds its clipped region. The loop includes a
+  pause for reading; short paths remain stationary. Changing the path or available
+  path width restarts the animation, while ticking playback information does not.
+- Narrow windows prioritize the controls and file counter over optional playback
+  details. The title bar does not show a full-path hover popup.
 
 ## Diagnostics and activation
 
