@@ -195,6 +195,7 @@ pub struct ViewerApp {
     is_maximized: bool,
     video_player: Option<VideoPlayer>,
     video_texture_id: Option<egui::TextureId>,
+    uploaded_video_revision: Option<u64>,
     video_wgpu_texture: Option<wgpu::Texture>,
     video_size: Option<[u32; 2]>,
     pending_slideshow_timer_reset: bool,
@@ -241,6 +242,7 @@ impl ViewerApp {
             is_maximized: settings.maximized,
             video_player: None,
             video_texture_id: None,
+            uploaded_video_revision: None,
             video_wgpu_texture: None,
             video_size: None,
             pending_slideshow_timer_reset: false,
@@ -316,6 +318,7 @@ impl ViewerApp {
     }
 
     fn free_video_texture(&mut self) {
+        self.uploaded_video_revision = None;
         if let Some(id) = self.video_texture_id.take() {
             let mut renderer = self.render_state.renderer.write();
             renderer.free_texture(&id);
@@ -1755,13 +1758,15 @@ impl ViewerApp {
         let is_buffering = self.video_player.as_ref().is_some_and(|p| p.is_buffering());
 
         let av_offset = self.settings.audio_offset_ms as f64 / 1000.0;
+        let uploaded_revision = self.uploaded_video_revision;
         let new_frame = self.video_player.as_mut().and_then(|p| {
-            let f = p.poll_frame(av_offset)?;
-            Some((f.rgba.clone(), f.width, f.height))
+            let (revision, f) = p.poll_frame_for_upload(av_offset, uploaded_revision)?;
+            Some((revision, f.rgba.clone(), f.width, f.height))
         });
 
-        if let Some((rgba, width, height)) = new_frame {
+        if let Some((revision, rgba, width, height)) = new_frame {
             self.upload_video_frame(&rgba, width, height);
+            self.uploaded_video_revision = Some(revision);
         }
 
         if is_buffering {

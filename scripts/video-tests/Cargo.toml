@@ -1,0 +1,13 @@
+[package]
+name = "video-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+ffmpeg-next = "7"
+cpal = "0.15"
+log = "0.4"

@@ -1,0 +1,8 @@
+services:
+  video-tests:
+    build:
+      context: ../..
+      dockerfile: scripts/video-tests/Dockerfile
+    volumes:
+      - ../..:/app
+      - ../../target-docker/video-tests:/app/target/video-tests
