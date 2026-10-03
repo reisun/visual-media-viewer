@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 
 use ffmpeg_next::codec::packet::traits::{Mut as PacketMut, Ref as PacketRef};
 
+#[cfg(test)]
+thread_local! {
+    static INPUT_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub struct VideoFrame {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -90,11 +95,22 @@ struct VideoPacketData {
     flags: i32,
 }
 
+struct PreparedVideoInput {
+    input: ffmpeg_next::format::context::Input,
+    decoder: ffmpeg_next::decoder::Video,
+    video_idx: usize,
+    video_time_base: f64,
+    duration: f64,
+    video_size: [u32; 2],
+    diag_info: String,
+    has_audio: bool,
+}
+
 /// Active playback session (destroyed and recreated on each play_from)
 struct PlaybackSession {
     frame_rx: mpsc::Receiver<VideoFrame>,
     cmd_tx: mpsc::Sender<Command>,
-    demuxer_thread: thread::JoinHandle<()>,
+    demuxer_thread: thread::JoinHandle<Option<ffmpeg_next::format::context::Input>>,
     video_thread: thread::JoinHandle<()>,
     audio_stream: Option<cpal::Stream>,
     audio_clock: Arc<AudioClock>,
@@ -109,10 +125,12 @@ pub struct VideoPlayer {
     pub video_size: [u32; 2],
     pub diag_info: String,
     has_audio: bool,
+    reuse_input: bool,
     volume: Arc<AtomicU16>,
     normalize: Arc<AtomicBool>,
     session: Option<PlaybackSession>,
     current_frame: Option<VideoFrame>,
+    frame_revision: u64,
     buffered_frame: Option<VideoFrame>,
     prebuffer_queue: std::collections::VecDeque<VideoFrame>,
     awaiting_first_frame: bool,
@@ -126,20 +144,23 @@ impl VideoPlayer {
     pub fn open(path: &Path, normalize: bool) -> Result<Self, String> {
         ffmpeg_next::init().map_err(|e| format!("FFmpeg init failed: {}", e))?;
 
-        let (duration, video_size, diag_info, has_audio) = Self::probe(path)?;
+        let prepared = Self::prepare_input(path)?;
 
         let volume = Arc::new(AtomicU16::new(100));
         let mut player = Self {
             path: path.to_path_buf(),
             state: PlaybackState::Playing,
-            duration,
-            video_size,
-            diag_info,
-            has_audio,
+            duration: prepared.duration,
+            video_size: prepared.video_size,
+            diag_info: prepared.diag_info.clone(),
+            has_audio: prepared.has_audio,
+            reuse_input: std::env::var_os("VMV_DISABLE_INPUT_REUSE").as_deref()
+                != Some(std::ffi::OsStr::new("1")),
             volume,
             normalize: Arc::new(AtomicBool::new(normalize)),
             session: None,
             current_frame: None,
+            frame_revision: 0,
             buffered_frame: None,
             prebuffer_queue: std::collections::VecDeque::new(),
             awaiting_first_frame: true,
@@ -149,21 +170,30 @@ impl VideoPlayer {
             paused_elapsed: 0.0,
         };
 
-        player.play_from(0.0);
+        player.session = Some(player.create_session_from_input(0.0, prepared)?);
         Ok(player)
     }
 
-    fn probe(path: &Path) -> Result<(f64, [u32; 2], String, bool), String> {
+    fn prepare_input(path: &Path) -> Result<PreparedVideoInput, String> {
         let mut opts = ffmpeg_next::Dictionary::new();
         opts.set("probesize", "500000");
         opts.set("analyzeduration", "500000");
         let ictx = ffmpeg_next::format::input_with_dictionary(&path, opts)
             .map_err(|e| format!("Cannot open {}: {}", path.display(), e))?;
+        #[cfg(test)]
+        INPUT_OPEN_COUNT.with(|count| count.set(count.get() + 1));
 
+        Self::prepare_open_input(ictx)
+    }
+
+    fn prepare_open_input(
+        ictx: ffmpeg_next::format::context::Input,
+    ) -> Result<PreparedVideoInput, String> {
         let video_stream = ictx
             .streams()
             .best(ffmpeg_next::media::Type::Video)
             .ok_or("No video stream found")?;
+        let video_idx = video_stream.index();
         let tb = video_stream.time_base();
         let video_time_base = tb.0 as f64 / tb.1 as f64;
         let stream_duration = video_stream.duration();
@@ -175,8 +205,12 @@ impl VideoPlayer {
 
         let video_codec_par = video_stream.parameters();
         let video_codec_id = unsafe { (*video_codec_par.as_ptr()).codec_id };
-        let ctx = ffmpeg_next::codec::context::Context::from_parameters(video_codec_par)
+        let mut ctx = ffmpeg_next::codec::context::Context::from_parameters(video_codec_par)
             .map_err(|e| format!("Video codec context failed: {}", e))?;
+        let mut thread_config = ffmpeg_next::threading::Config::default();
+        thread_config.kind = ffmpeg_next::threading::Type::Frame;
+        thread_config.count = 0;
+        ctx.set_threading(thread_config);
         let dec = ctx
             .decoder()
             .video()
@@ -208,15 +242,25 @@ impl VideoPlayer {
         }
         let diag_info = format!("{}\n{}", video_info, audio_info_str);
 
-        Ok((duration, [width, height], diag_info, has_audio))
+        Ok(PreparedVideoInput {
+            input: ictx,
+            decoder: dec,
+            video_idx,
+            video_time_base,
+            duration,
+            video_size: [width, height],
+            diag_info,
+            has_audio,
+        })
     }
 
     /// Start (or restart) playback from the given position.
-    /// Destroys any existing session and creates a fresh one.
+    /// Recreates decoders, audio output and queues after joining the old session.
+    /// Only the demux input may be retained and repositioned.
     pub fn play_from(&mut self, position: f64) {
         log::info!("[player] play_from position={:.3}", position);
         // 1. Destroy existing session completely
-        self.stop_session();
+        let previous_input = self.stop_session();
 
         // 2. Reset all display state
         self.current_frame = None;
@@ -230,7 +274,7 @@ impl VideoPlayer {
         self.state = PlaybackState::Playing;
 
         // 3. Create new session
-        match self.create_session(position) {
+        match self.create_session(position, previous_input) {
             Ok(session) => self.session = Some(session),
             Err(e) => {
                 log::error!("play_from failed: {}", e);
@@ -239,7 +283,7 @@ impl VideoPlayer {
         }
     }
 
-    fn stop_session(&mut self) {
+    fn stop_session(&mut self) -> Option<ffmpeg_next::format::context::Input> {
         if let Some(session) = self.session.take() {
             log::info!("[player] stop_session: sending Stop command");
             session.stop_flag.store(true, Ordering::Release);
@@ -252,40 +296,63 @@ impl VideoPlayer {
                 Err(e) => log::error!("[player] video thread panicked: {:?}", e),
             }
             match session.demuxer_thread.join() {
-                Ok(()) => log::info!("[player] demuxer thread joined normally"),
+                Ok(input) => {
+                    log::info!("[player] demuxer thread joined normally");
+                    return input;
+                }
                 Err(e) => log::error!("[player] demuxer thread panicked: {:?}", e),
             }
         }
+        None
     }
 
-    fn create_session(&self, position: f64) -> Result<PlaybackSession, String> {
-        let mut opts = ffmpeg_next::Dictionary::new();
-        opts.set("probesize", "500000");
-        opts.set("analyzeduration", "500000");
-        let mut ictx = ffmpeg_next::format::input_with_dictionary(&self.path, opts)
-            .map_err(|e| format!("Cannot open: {}", e))?;
+    fn create_session(
+        &self,
+        position: f64,
+        previous_input: Option<ffmpeg_next::format::context::Input>,
+    ) -> Result<PlaybackSession, String> {
+        if self.reuse_input {
+            if let Some(mut input) = previous_input {
+                // avformat_seek_file flushes demux buffers, including at position zero.
+                // All decoders, queues, clocks and audio output are still recreated.
+                let ts = (position * 1_000_000.0) as i64;
+                let prepared = input
+                    .seek(ts, ..ts)
+                    .map_err(|e| format!("Input seek failed: {}", e))
+                    .and_then(|()| Self::prepare_open_input(input));
+                match prepared {
+                    Ok(prepared) => {
+                        log::info!("[player] reusing demux input at {:.3}", position);
+                        return self.create_session_from_input(position, prepared);
+                    }
+                    Err(e) => log::warn!("[player] input reuse failed, reopening: {}", e),
+                }
+            }
+        }
+        log::info!("[player] opening fresh demux input at {:.3}", position);
+        let mut prepared = Self::prepare_input(&self.path)?;
+        if position > 0.0 {
+            let ts = (position * 1_000_000.0) as i64;
+            prepared
+                .input
+                .seek(ts, ..ts)
+                .map_err(|e| format!("Input seek failed: {}", e))?;
+        }
+        self.create_session_from_input(position, prepared)
+    }
 
-        let video_stream = ictx
-            .streams()
-            .best(ffmpeg_next::media::Type::Video)
-            .ok_or("No video stream")?;
-        let video_idx = video_stream.index();
-        let tb = video_stream.time_base();
-        let video_time_base = tb.0 as f64 / tb.1 as f64;
-
-        let video_codec_par = video_stream.parameters();
-        let mut video_decoder_ctx =
-            ffmpeg_next::codec::context::Context::from_parameters(video_codec_par)
-                .map_err(|e| format!("Video codec ctx: {}", e))?;
-        let mut thread_config = ffmpeg_next::threading::Config::default();
-        thread_config.kind = ffmpeg_next::threading::Type::Frame;
-        thread_config.count = 0;
-        video_decoder_ctx.set_threading(thread_config);
-        let video_decoder = video_decoder_ctx
-            .decoder()
-            .video()
-            .map_err(|e| format!("Video decoder: {}", e))?;
-
+    fn create_session_from_input(
+        &self,
+        position: f64,
+        prepared: PreparedVideoInput,
+    ) -> Result<PlaybackSession, String> {
+        let PreparedVideoInput {
+            input: mut ictx,
+            decoder: video_decoder,
+            video_idx,
+            video_time_base,
+            ..
+        } = prepared;
         let src_w = video_decoder.width();
         let src_h = video_decoder.height();
 
@@ -311,12 +378,6 @@ impl VideoPlayer {
             }
             None => (None, 0.0, None),
         };
-
-        // Seek to position
-        if position > 0.0 {
-            let ts = (position * 1_000_000.0) as i64;
-            let _ = ictx.seek(ts, ..ts);
-        }
 
         // Audio output
         let audio_paused = Arc::new(AtomicBool::new(true));
@@ -409,7 +470,7 @@ impl VideoPlayer {
                     audio_idx,
                     audio_time_base,
                     audio_decoder,
-                    ictx,
+                    &mut ictx,
                     video_pkt_tx,
                     audio_sample_tx,
                     cmd_rx,
@@ -430,7 +491,9 @@ impl VideoPlayer {
                     format!("{:?}", e)
                 };
                 log::error!("[demuxer] PANIC: {}", msg);
+                return None;
             }
+            Some(ictx)
         });
 
         Ok(PlaybackSession {
@@ -525,6 +588,8 @@ impl VideoPlayer {
             if disconnected && self.prebuffer_queue.is_empty() {
                 log::error!("[poll_frame] decoder disconnected with empty prebuffer -> Finished");
                 self.state = PlaybackState::Finished;
+                self.awaiting_first_frame = false;
+                self.prebuffer_deadline = None;
                 return None;
             }
             if !self.prebuffer_queue.is_empty() {
@@ -538,6 +603,9 @@ impl VideoPlayer {
                 );
                 self.finish_prebuffer();
                 self.current_frame = self.prebuffer_queue.pop_front();
+                if self.current_frame.is_some() {
+                    self.frame_revision += 1;
+                }
                 self.buffered_frame = self.prebuffer_queue.pop_front();
             } else {
                 return None;
@@ -556,6 +624,7 @@ impl VideoPlayer {
             if let Some(ref buffered) = self.buffered_frame {
                 if buffered.pts <= clock {
                     self.current_frame = self.buffered_frame.take();
+                    self.frame_revision += 1;
                 } else {
                     break;
                 }
@@ -572,6 +641,7 @@ impl VideoPlayer {
                 Ok(frame) => {
                     if frame.pts <= clock {
                         self.current_frame = Some(frame);
+                        self.frame_revision += 1;
                     } else {
                         self.buffered_frame = Some(frame);
                         break;
@@ -590,8 +660,34 @@ impl VideoPlayer {
         self.current_frame.as_ref()
     }
 
+    /// Changes only when a newly selected frame replaces the displayed frame.
+    /// Retained across seeks; timestamps may repeat within or between sessions.
+    #[cfg(test)]
+    pub fn frame_revision(&self) -> u64 {
+        self.frame_revision
+    }
+
+    #[cfg(test)]
+    pub fn current_frame(&self) -> Option<&VideoFrame> {
+        self.current_frame.as_ref()
+    }
+
+    pub fn poll_frame_for_upload(
+        &mut self,
+        av_offset_secs: f64,
+        last_uploaded: Option<u64>,
+    ) -> Option<(u64, &VideoFrame)> {
+        self.poll_frame(av_offset_secs);
+        if last_uploaded == Some(self.frame_revision) {
+            return None;
+        }
+        self.current_frame
+            .as_ref()
+            .map(|frame| (self.frame_revision, frame))
+    }
+
     pub fn is_buffering(&self) -> bool {
-        self.awaiting_first_frame
+        matches!(self.state, PlaybackState::Playing) && self.awaiting_first_frame
     }
 
     pub fn current_pts(&self) -> f64 {
@@ -664,14 +760,16 @@ impl VideoPlayer {
     }
 
     pub fn stop(&mut self) {
-        self.stop_session();
+        drop(self.stop_session());
         self.state = PlaybackState::Finished;
+        self.awaiting_first_frame = false;
+        self.prebuffer_deadline = None;
     }
 }
 
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
-        self.stop_session();
+        drop(self.stop_session());
     }
 }
 
@@ -875,7 +973,7 @@ fn demuxer_audio_loop(
     audio_idx: Option<usize>,
     audio_time_base: f64,
     audio_decoder: Option<ffmpeg_next::decoder::Audio>,
-    mut ictx: ffmpeg_next::format::context::Input,
+    ictx: &mut ffmpeg_next::format::context::Input,
     video_pkt_tx: mpsc::Sender<VideoPacketData>,
     audio_tx: Option<mpsc::Sender<AudioChunk>>,
     cmd_rx: mpsc::Receiver<Command>,
@@ -962,7 +1060,7 @@ fn demuxer_audio_loop(
             last_log_time = Instant::now();
         }
 
-        match packet.read(&mut ictx) {
+        match packet.read(ictx) {
             Ok(..) => {}
             Err(ffmpeg_next::Error::Eof) => {
                 log::info!(
@@ -1337,4 +1435,162 @@ fn adapt_channels(samples: &[f32], src_channels: u16, dst_channels: u16) -> Vec<
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_player() -> VideoPlayer {
+        VideoPlayer {
+            path: PathBuf::new(),
+            state: PlaybackState::Playing,
+            duration: 10.0,
+            video_size: [1, 1],
+            diag_info: String::new(),
+            has_audio: false,
+            reuse_input: true,
+            volume: Arc::new(AtomicU16::new(100)),
+            normalize: Arc::new(AtomicBool::new(false)),
+            session: None,
+            current_frame: None,
+            frame_revision: 0,
+            buffered_frame: None,
+            prebuffer_queue: std::collections::VecDeque::new(),
+            awaiting_first_frame: false,
+            prebuffer_deadline: None,
+            playback_start: Instant::now(),
+            playback_start_pts: 0.0,
+            paused_elapsed: 0.0,
+        }
+    }
+
+    fn frame(value: u8) -> VideoFrame {
+        VideoFrame {
+            rgba: vec![value; 4],
+            width: 1,
+            height: 1,
+            pts: 0.0,
+        }
+    }
+
+    #[test]
+    fn upload_revision_distinguishes_equal_timestamps_and_retained_frames() {
+        let mut player = test_player();
+        player.buffered_frame = Some(frame(1));
+        let (first, pixels) = player.poll_frame_for_upload(0.0, None).unwrap();
+        assert_eq!(pixels.rgba[0], 1);
+        assert!(player.poll_frame_for_upload(0.0, Some(first)).is_none());
+        player.buffered_frame = Some(frame(2));
+        let (second, pixels) = player.poll_frame_for_upload(0.0, Some(first)).unwrap();
+        assert!(second > first);
+        assert_eq!(pixels.rgba[0], 2);
+        player.toggle_pause();
+        assert!(player.poll_frame_for_upload(0.0, Some(second)).is_none());
+        // A lost texture must be uploadable even while paused.
+        assert_eq!(player.poll_frame_for_upload(0.0, None).unwrap().0, second);
+    }
+
+    #[test]
+    fn initial_prebuffer_frame_advances_revision() {
+        let mut player = test_player();
+        player.awaiting_first_frame = true;
+        player.prebuffer_queue.push_back(frame(3));
+        player.prebuffer_deadline = Some(Instant::now());
+        assert_eq!(player.poll_frame_for_upload(0.0, None).unwrap().0, 1);
+        assert!(player.poll_frame_for_upload(0.0, Some(1)).is_none());
+    }
+
+    #[test]
+    fn empty_decoder_eof_ends_buffering() {
+        let mut player = test_player();
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let (cmd_tx, _) = mpsc::channel();
+        drop(frame_tx);
+        player.session = Some(PlaybackSession {
+            frame_rx,
+            cmd_tx,
+            demuxer_thread: thread::spawn(|| None),
+            video_thread: thread::spawn(|| {}),
+            audio_stream: None,
+            audio_clock: Arc::new(AudioClock::new(2, 48000)),
+            audio_paused: Arc::new(AtomicBool::new(true)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        });
+        player.awaiting_first_frame = true;
+        player.prebuffer_deadline = Some(Instant::now() + Duration::from_secs(2));
+        assert!(player.is_buffering());
+        assert!(player.poll_frame(0.0).is_none());
+        assert!(matches!(player.state, PlaybackState::Finished));
+        assert!(!player.is_buffering());
+        assert!(!player.awaiting_first_frame);
+        assert!(player.prebuffer_deadline.is_none());
+    }
+
+    #[test]
+    fn stopped_or_paused_player_is_not_buffering() {
+        let mut player = test_player();
+        player.awaiting_first_frame = true;
+        assert!(player.is_buffering());
+        player.toggle_pause();
+        assert!(!player.is_buffering());
+        player.toggle_pause();
+        assert!(player.is_buffering());
+        player.stop();
+        assert!(!player.is_buffering());
+        assert!(!player.awaiting_first_frame);
+        player.awaiting_first_frame = true;
+        assert!(!player.is_buffering());
+    }
+
+    #[test]
+    fn stopped_demux_input_is_reused_and_opt_out_reopens() {
+        let Some(dir) = std::env::var_os("VMV_VIDEO_FIXTURES") else {
+            return;
+        };
+        let path = PathBuf::from(dir).join("silent.mp4");
+        let before_open = INPUT_OPEN_COUNT.with(|count| count.get());
+        let mut player = VideoPlayer::open(&path, false).unwrap();
+        assert_eq!(INPUT_OPEN_COUNT.with(|count| count.get()), before_open + 1);
+        player.reuse_input = true;
+        let input = player.stop_session().unwrap();
+        let original_ptr = unsafe { input.as_ptr() };
+        let opens = INPUT_OPEN_COUNT.with(|count| count.get());
+        let session = player.create_session(1.0, Some(input)).unwrap();
+        assert_eq!(INPUT_OPEN_COUNT.with(|count| count.get()), opens);
+        player.session = Some(session);
+        let reused = player.stop_session().unwrap();
+        assert_eq!(unsafe { reused.as_ptr() }, original_ptr);
+        // Keep the old input alive during opening so allocator reuse cannot
+        // make pointer equality mask a reopened context.
+        player.reuse_input = false;
+        player.session = Some(player.create_session(0.0, None).unwrap());
+        let fresh = player.stop_session().unwrap();
+        assert_ne!(unsafe { fresh.as_ptr() }, unsafe { reused.as_ptr() });
+        player.path = path.join("missing.mp4");
+        assert!(player.create_session(0.0, Some(reused)).is_err());
+    }
+
+    #[test]
+    fn invalid_reused_input_falls_back_to_fresh_video_input() {
+        let Some(dir) = std::env::var_os("VMV_VIDEO_FIXTURES") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let mut player = VideoPlayer::open(&dir.join("silent.mp4"), false).unwrap();
+        player.reuse_input = true;
+        drop(player.stop_session());
+        let audio_input = ffmpeg_next::format::input(&dir.join("audio-only.m4a")).unwrap();
+        let opens = INPUT_OPEN_COUNT.with(|count| count.get());
+        player.session = Some(player.create_session(0.0, Some(audio_input)).unwrap());
+        assert_eq!(INPUT_OPEN_COUNT.with(|count| count.get()), opens + 1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while player.poll_frame_for_upload(0.0, None).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "fallback produced no video frame"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }

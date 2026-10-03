@@ -7,6 +7,11 @@ cache runs at most one decode at a time, prioritizes the latest selected image,
 and keeps a bounded queue of nearby files. An already running codec operation
 cannot be interrupted; the latest selection runs after that operation finishes.
 While work is pending, the UI schedules repaint polling every 16 milliseconds.
+When navigating between images, the last displayed texture and its display
+position remain visible until the new image is ready. At most one previous
+texture is retained, independently of nearby-cache eviction. It is released on
+replacement, a load error, or switching to video. The initial load, with no
+previous image, still shows a spinner.
 
 Folder changes invalidate results from the previous cache generation. Selecting
 a video cancels queued image work. Decode failures belong to the requested path

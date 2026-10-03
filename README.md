@@ -61,6 +61,7 @@ FFmpeg DLL は同梱されています。
 ## ビルド
 
 画像読み込みの仕様と検証方法は [image-loading.md](docs/image-loading.md) を参照。
+動画の起動・シーク・描画最適化と検証方法は [video-playback.md](docs/video-playback.md) を参照。
 
 Docker ベースのクロスコンパイル（Linux → Windows x86_64）:
 

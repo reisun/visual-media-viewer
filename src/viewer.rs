@@ -108,6 +108,12 @@ struct TextureEntry {
     size: [usize; 2],
 }
 
+struct LoadingImage {
+    texture: TextureEntry,
+    rect: egui::Rect,
+    uvs: [egui::Pos2; 4],
+}
+
 fn normalize_slideshow_interval(interval: f64) -> f64 {
     ((interval.clamp(1.0, 30.0)) * 10.0).round() / 10.0
 }
@@ -195,6 +201,7 @@ pub struct ViewerApp {
     is_maximized: bool,
     video_player: Option<VideoPlayer>,
     video_texture_id: Option<egui::TextureId>,
+    uploaded_video_revision: Option<u64>,
     video_wgpu_texture: Option<wgpu::Texture>,
     video_size: Option<[u32; 2]>,
     pending_slideshow_timer_reset: bool,
@@ -203,6 +210,8 @@ pub struct ViewerApp {
     render_state: Arc<eframe::egui_wgpu::RenderState>,
     ipc_rx: mpsc::Receiver<PathBuf>,
     texture_cache: HashMap<PathBuf, TextureEntry>,
+    displayed_image: Option<(PathBuf, egui::Rect, [egui::Pos2; 4])>,
+    loading_image: Option<LoadingImage>,
     pending_folder_delete: Option<FolderDeleteRequest>,
     dialog_message: Option<DialogMessage>,
 }
@@ -241,6 +250,7 @@ impl ViewerApp {
             is_maximized: settings.maximized,
             video_player: None,
             video_texture_id: None,
+            uploaded_video_revision: None,
             video_wgpu_texture: None,
             video_size: None,
             pending_slideshow_timer_reset: false,
@@ -249,6 +259,8 @@ impl ViewerApp {
             render_state,
             ipc_rx,
             texture_cache: HashMap::new(),
+            displayed_image: None,
+            loading_image: None,
             pending_folder_delete: None,
             dialog_message: None,
         };
@@ -316,6 +328,7 @@ impl ViewerApp {
     }
 
     fn free_video_texture(&mut self) {
+        self.uploaded_video_revision = None;
         if let Some(id) = self.video_texture_id.take() {
             let mut renderer = self.render_state.renderer.write();
             renderer.free_texture(&id);
@@ -433,7 +446,22 @@ impl ViewerApp {
         }
     }
 
+    fn clear_loading_image(&mut self) {
+        if let Some(previous) = self.loading_image.take() {
+            self.render_state
+                .renderer
+                .write()
+                .free_texture(&previous.texture.texture_id);
+        }
+    }
+
     fn load_current_image(&mut self) {
+        if let Some((path, rect, uvs)) = self.displayed_image.take() {
+            if let Some(texture) = self.texture_cache.remove(&path) {
+                self.clear_loading_image();
+                self.loading_image = Some(LoadingImage { texture, rect, uvs });
+            }
+        }
         self.stop_video();
         self.image_size = None;
         self.error_message = None;
@@ -448,6 +476,7 @@ impl ViewerApp {
         };
 
         if file_list::is_video_file(&path) {
+            self.clear_loading_image();
             self.cache.cancel_current();
             match VideoPlayer::open(&path, self.settings.normalize_audio) {
                 Ok(player) => {
@@ -864,6 +893,12 @@ impl ViewerApp {
             } else if target >= duration && duration > 0.0 {
                 if (duration - current) > EDGE_THRESHOLD {
                     player.seek((duration - 0.1).max(0.0)).ok();
+                } else if self
+                    .file_list
+                    .as_ref()
+                    .is_none_or(|fl| fl.file_count() <= 1)
+                {
+                    player.stop();
                 } else {
                     self.next_image();
                 }
@@ -1648,6 +1683,9 @@ impl eframe::App for ViewerApp {
             .show(ctx, |ui| {
                 let available = ui.available_size();
 
+                if self.error_message.is_some() {
+                    self.clear_loading_image();
+                }
                 if let Some(error) = &self.error_message {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(egui::Color32::RED, error.as_str());
@@ -1687,6 +1725,7 @@ impl eframe::App for ViewerApp {
                     };
 
                     if let Some((tex_id, img_size)) = tex_info {
+                        self.clear_loading_image();
                         self.image_size = Some(img_size);
                         let center = ui.available_rect_before_wrap().center();
                         let image_rect = self.compute_display_rect(&img_size, available, center);
@@ -1695,10 +1734,19 @@ impl eframe::App for ViewerApp {
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
                         let uvs = self.transform.rotated_uvs();
+                        self.displayed_image = Some((path, image_rect, uvs));
                         image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
 
                         self.handle_zoom_input(&response, available);
                         self.handle_mouse_pan(&response, available);
+                    } else if let Some(previous) = &self.loading_image {
+                        let (_, painter) = ui.allocate_painter(available, egui::Sense::hover());
+                        image_decode::paint_textured_rect(
+                            &painter,
+                            previous.texture.texture_id,
+                            previous.rect,
+                            &previous.uvs,
+                        );
                     } else if self.cache.is_loading() {
                         ui.centered_and_justified(|ui| {
                             ui.spinner();
@@ -1752,19 +1800,42 @@ impl ViewerApp {
     }
 
     fn render_video_frame(&mut self, ui: &mut egui::Ui, available: egui::Vec2) {
-        let is_buffering = self.video_player.as_ref().is_some_and(|p| p.is_buffering());
-
+        let was_playing = self
+            .video_player
+            .as_ref()
+            .is_some_and(|p| matches!(p.state, PlaybackState::Playing));
         let av_offset = self.settings.audio_offset_ms as f64 / 1000.0;
+        let uploaded_revision = self.uploaded_video_revision;
         let new_frame = self.video_player.as_mut().and_then(|p| {
-            let f = p.poll_frame(av_offset)?;
-            Some((f.rgba.clone(), f.width, f.height))
+            let (revision, f) = p.poll_frame_for_upload(av_offset, uploaded_revision)?;
+            Some((revision, f.rgba.clone(), f.width, f.height))
         });
 
-        if let Some((rgba, width, height)) = new_frame {
+        if let Some((revision, rgba, width, height)) = new_frame {
             self.upload_video_frame(&rgba, width, height);
+            self.uploaded_video_revision = Some(revision);
         }
 
-        if is_buffering {
+        // Polling can reach EOF, so decide the indicator from the updated state.
+        let is_finished = self
+            .video_player
+            .as_ref()
+            .is_some_and(|p| matches!(p.state, PlaybackState::Finished));
+        if is_finished {
+            if was_playing {
+                // Let the next update handle slideshow advancement after EOF.
+                ui.ctx().request_repaint();
+            }
+            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::hover());
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(rect.center(), egui::vec2(24.0, 24.0)),
+                2.0,
+                egui::Color32::LIGHT_GRAY,
+            );
+            response.on_hover_text("停止");
+            return;
+        }
+        if self.video_player.as_ref().is_some_and(|p| p.is_buffering()) {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
             });
