@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::cache::ImageCache;
 use crate::file_list::{self, FileList, GroupBy, SortKey, SortOrder};
 use crate::folder_ops::{self, FolderDeleteRequest};
-use crate::image_decode::{self, DecodedImage};
+use crate::image_decode;
 use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
 use crate::video_player::{PlaybackState, VideoPlayer};
 
@@ -180,6 +180,7 @@ struct DialogMessage {
 
 pub struct ViewerApp {
     image_size: Option<[usize; 2]>,
+    preview_dim: u32,
     file_list: Option<FileList>,
     cache: ImageCache,
     transform: ViewTransform,
@@ -222,6 +223,7 @@ impl ViewerApp {
 
         let mut app = Self {
             image_size: None,
+            preview_dim: 2048,
             file_list: None,
             cache: ImageCache::new(
                 1_500_000_000,
@@ -282,7 +284,11 @@ impl ViewerApp {
 
     fn pre_upload_nearby_textures(&mut self) {
         let nearby = match self.file_list.as_ref() {
-            Some(fl) => fl.nearby_paths(3),
+            Some(fl) => {
+                let mut paths = fl.nearby_paths(3);
+                paths.sort_by_key(|path| Some(path.as_path()) != fl.current_path());
+                paths
+            }
             None => return,
         };
         for path in nearby {
@@ -292,6 +298,7 @@ impl ViewerApp {
             if self.texture_cache.contains_key(&path) {
                 continue;
             }
+            let original_size = self.cache.original_size(&path);
             if let Some(pixels) = self.cache.get(&path) {
                 let (id, tex, actual_size) =
                     image_decode::create_mipmapped_texture(&self.render_state, pixels);
@@ -300,7 +307,7 @@ impl ViewerApp {
                     TextureEntry {
                         texture_id: id,
                         _wgpu_texture: tex,
-                        size: actual_size,
+                        size: original_size.unwrap_or(actual_size),
                     },
                 );
                 return;
@@ -441,6 +448,7 @@ impl ViewerApp {
         };
 
         if file_list::is_video_file(&path) {
+            self.cache.cancel_current();
             match VideoPlayer::open(&path, self.settings.normalize_audio) {
                 Ok(player) => {
                     player.set_volume(self.settings.volume);
@@ -455,26 +463,9 @@ impl ViewerApp {
                 }
             }
         } else {
-            match self.cache.get(&path) {
-                Some(pixels) => {
-                    self.image_size = Some(pixels.size);
-                }
-                None => {
-                    match DecodedImage::load(
-                        &path,
-                        self.render_state.device.limits().max_texture_dimension_2d,
-                    ) {
-                        Ok(decoded) => {
-                            self.image_size = Some(decoded.pixels.size);
-                            self.cache.insert(path, decoded.pixels);
-                        }
-                        Err(e) => {
-                            log::error!("{}", e);
-                            self.error_message = Some(e);
-                        }
-                    }
-                }
-            }
+            self.image_size = self.cache.original_size(&path);
+            let preview = (self.fit_mode == FitMode::FitToWindow).then_some(self.preview_dim);
+            self.cache.request(path, preview);
             self.start_preload();
         }
     }
@@ -1423,7 +1414,32 @@ impl ViewerApp {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.cache.poll();
+        let screen = ctx.screen_rect().size() * ctx.pixels_per_point();
+        self.preview_dim = screen.x.max(screen.y).ceil().max(1.0) as u32;
+        for path in self.cache.poll() {
+            if let Some(entry) = self.texture_cache.remove(&path) {
+                self.render_state
+                    .renderer
+                    .write()
+                    .free_texture(&entry.texture_id);
+            }
+        }
+        if let Some(path) = self.file_list.as_ref().and_then(|fl| fl.current_path()) {
+            if !file_list::is_video_file(path) {
+                if let Some(error) = self.cache.error(path) {
+                    self.error_message = Some(error.to_owned());
+                }
+                if self.cache.is_preview(path) {
+                    let preview =
+                        if self.fit_mode == FitMode::OriginalSize || self.transform.zoom > 1.0 {
+                            None
+                        } else {
+                            Some(self.preview_dim)
+                        };
+                    self.cache.request(path.to_path_buf(), preview);
+                }
+            }
+        }
         self.pre_upload_nearby_textures();
         self.evict_distant_textures();
 
@@ -1651,6 +1667,7 @@ impl eframe::App for ViewerApp {
                     .map(|p| p.to_path_buf());
 
                 if let Some(path) = current_path {
+                    let original_size = self.cache.original_size(&path);
                     let tex_info = if let Some(entry) = self.texture_cache.get(&path) {
                         Some((entry.texture_id, entry.size))
                     } else if let Some(pixels) = self.cache.get(&path) {
@@ -1661,10 +1678,10 @@ impl eframe::App for ViewerApp {
                             TextureEntry {
                                 texture_id: id,
                                 _wgpu_texture: tex,
-                                size: actual_size,
+                                size: original_size.unwrap_or(actual_size),
                             },
                         );
-                        Some((id, actual_size))
+                        Some((id, original_size.unwrap_or(actual_size)))
                     } else {
                         None
                     };
@@ -1682,6 +1699,10 @@ impl eframe::App for ViewerApp {
 
                         self.handle_zoom_input(&response, available);
                         self.handle_mouse_pan(&response, available);
+                    } else if self.cache.is_loading() {
+                        ui.centered_and_justified(|ui| {
+                            ui.spinner();
+                        });
                     }
                 } else if self.file_list.is_none() {
                     ui.centered_and_justified(|ui| {
@@ -1694,6 +1715,9 @@ impl eframe::App for ViewerApp {
 
         self.draw_folder_delete_dialog(ctx);
         self.draw_dialog_message(ctx);
+        if self.cache.is_loading() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
     }
 }
 

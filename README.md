@@ -5,7 +5,7 @@
 ## 特徴
 
 - **GPU描画**: wgpu によるハードウェアアクセラレーション描画
-- **高速画像表示**: GPU mipmap生成、JPEG半サイズデコード（libjpeg-turbo）、テクスチャ事前アップロード
+- **高速画像表示**: 非同期読み込み、JPEGの表示サイズ別プレビューと拡大時の高解像度化、GPU mipmap生成、テクスチャ事前アップロード
 - **幅広いフォーマット**: JPEG / PNG / GIF / BMP / WebP / TIFF / HEIC
 - **動画再生**: MP4 / WebM / MKV / AVI / MOV / WMV 等（FFmpeg LGPL）
 - **音声同期**: cpal + FFmpegデコード + リサンプラー
@@ -59,6 +59,8 @@ FFmpeg DLL は同梱されています。
 - 動画再生中は間隔タイマーを無視し、`PlaybackState::Finished` になった時点で 1 回だけ次ファイルへ進みます
 
 ## ビルド
+
+画像読み込みの仕様と検証方法は [image-loading.md](docs/image-loading.md) を参照。
 
 Docker ベースのクロスコンパイル（Linux → Windows x86_64）:
 

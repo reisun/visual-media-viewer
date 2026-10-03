@@ -1,0 +1,16 @@
+[package]
+name = "image-loading-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["wgpu", "x11"] }
+wgpu = "24"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
+turbojpeg = "1"
+natord = "1.0"
+log = "0.4"
