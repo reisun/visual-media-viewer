@@ -11,6 +11,7 @@ use crate::cache::ImageCache;
 use crate::file_list::{self, FileList, GroupBy, SortKey, SortOrder};
 use crate::folder_ops::{self, FolderDeleteRequest};
 use crate::image_decode;
+use crate::media_overlay::{self, MediaOverlay};
 use crate::settings::{FitModeSetting, GroupBySetting, Settings, SortKeySetting, SortOrderSetting};
 use crate::video_player::{PlaybackState, VideoPlayer};
 
@@ -198,6 +199,7 @@ pub struct ViewerApp {
     show_titlebar_menu: bool,
     titlebar_menu_pos: egui::Pos2,
     title_root: Option<PathBuf>,
+    title_marquee: crate::title_bar::Marquee,
     is_maximized: bool,
     video_player: Option<VideoPlayer>,
     video_texture_id: Option<egui::TextureId>,
@@ -247,6 +249,7 @@ impl ViewerApp {
             show_titlebar_menu: false,
             titlebar_menu_pos: egui::Pos2::ZERO,
             title_root: None,
+            title_marquee: crate::title_bar::Marquee::default(),
             is_maximized: settings.maximized,
             video_player: None,
             video_texture_id: None,
@@ -589,7 +592,7 @@ impl ViewerApp {
         }
     }
 
-    fn title_text(&self) -> String {
+    fn title_text(&self) -> (String, String, String) {
         if let Some(fl) = &self.file_list {
             if let Some(path) = fl.current_path() {
                 let filename = path
@@ -609,7 +612,7 @@ impl ViewerApp {
                         format!("{parent_name}/{filename}")
                     });
                 let position = format!("{} / {}", fl.current_index() + 1, fl.file_count());
-                let mut title = format!("{} ({})", title_path, position);
+                let mut status = String::new();
                 if let Some(player) = &self.video_player {
                     let state_str = match player.state {
                         PlaybackState::Playing => "再生中",
@@ -624,7 +627,7 @@ impl ViewerApp {
                         let sec = (s as u64) % 60;
                         format!("{}:{:02}", m, sec)
                     };
-                    title.push_str(&format!(
+                    status.push_str(&format!(
                         " [{} Vol:{}%] [{} / {}]",
                         state_str,
                         vol,
@@ -632,12 +635,16 @@ impl ViewerApp {
                         fmt(dur)
                     ));
                 } else if self.slideshow_active {
-                    title.push_str(&format!(" <自動: {:.1}s>", self.slideshow_interval));
+                    status.push_str(&format!(" <自動: {:.1}s>", self.slideshow_interval));
                 }
-                return title;
+                return (title_path, format!("({position})"), status);
             }
         }
-        "Visual Media Viewer".to_string()
+        (
+            "Visual Media Viewer".to_string(),
+            String::new(),
+            String::new(),
+        )
     }
 
     /// Compute the fit-to-window scale for the current image given available size.
@@ -909,7 +916,13 @@ impl ViewerApp {
     }
 
     fn draw_title_bar(&mut self, ctx: &egui::Context) {
-        let title_text = self.title_text();
+        let (title_path, title_count, title_status) = self.title_text();
+        let full_path = self
+            .file_list
+            .as_ref()
+            .and_then(|fl| fl.current_path())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| title_path.clone());
         let title_bar_height = 28.0;
 
         egui::TopBottomPanel::top("title_bar")
@@ -920,8 +933,36 @@ impl ViewerApp {
                     .inner_margin(egui::Margin::symmetric(8, 0)),
             )
             .show(ctx, |ui| {
+                let bar = ui.available_rect_before_wrap();
+                let font = egui::FontId::proportional(13.0);
+                let color = egui::Color32::from_gray(220);
+                let painter = ui.painter();
+                let path_galley = painter.layout_no_wrap(title_path.clone(), font.clone(), color);
+                let count_galley = painter.layout_no_wrap(title_count.clone(), font.clone(), color);
+                let status_galley =
+                    painter.layout_no_wrap(title_status.clone(), font.clone(), color);
+                // Reserve stable metadata width as the playback clock changes.
+                let status_width = if let Some(player) = &self.video_player {
+                    let minutes = (player.duration.max(0.0) as u64 / 60).to_string().len();
+                    let time = format!("{}:88", "8".repeat(minutes));
+                    painter
+                        .layout_no_wrap(
+                            format!(" [一時停止 Vol:100%] [{time} / {time}]"),
+                            font.clone(),
+                            color,
+                        )
+                        .size()
+                        .x
+                } else {
+                    status_galley.size().x
+                };
+                let regions = crate::title_bar::layout(bar, count_galley.size().x, status_width);
+                let drag_rect = egui::Rect::from_min_max(
+                    bar.min,
+                    egui::pos2(regions.controls[0].left(), bar.bottom()),
+                );
                 let bar_response = ui.interact(
-                    ui.available_rect_before_wrap(),
+                    drag_rect,
                     egui::Id::new("title_bar_bg"),
                     egui::Sense::click_and_drag(),
                 );
@@ -944,70 +985,93 @@ impl ViewerApp {
                     }
                 }
 
-                ui.horizontal_centered(|ui| {
-                    let text_rect = ui.available_rect_before_wrap();
-                    ui.painter().text(
-                        egui::pos2(text_rect.left(), text_rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        &title_text,
-                        egui::FontId::proportional(13.0),
-                        egui::Color32::from_gray(220),
+                let marquee_key = format!("{full_path}\n{title_path}");
+                let offset = self.title_marquee.offset(
+                    &marquee_key,
+                    regions.path.width(),
+                    path_galley.size().x,
+                    ctx.input(|i| i.time),
+                );
+                if path_galley.size().x > regions.path.width() && regions.path.width() > 0.0 {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(33));
+                }
+                ui.painter().with_clip_rect(regions.path).galley(
+                    egui::pos2(
+                        regions.path.left() - offset,
+                        regions.path.center().y - path_galley.size().y / 2.0,
+                    ),
+                    path_galley,
+                    color,
+                );
+                ui.painter().with_clip_rect(regions.status).galley(
+                    egui::pos2(
+                        regions.status.left(),
+                        regions.status.center().y - status_galley.size().y / 2.0,
+                    ),
+                    status_galley,
+                    color,
+                );
+                ui.painter().with_clip_rect(regions.count).galley(
+                    egui::pos2(
+                        regions.count.left(),
+                        regions.count.center().y - count_galley.size().y / 2.0,
+                    ),
+                    count_galley,
+                    color,
+                );
+                if bar_response.hovered() {
+                    bar_response.clone().on_hover_text(&full_path);
+                }
+
+                let close_btn = ui.put(
+                    regions.controls[2],
+                    egui::Button::new(
+                        egui::RichText::new("X")
+                            .color(egui::Color32::from_gray(200))
+                            .size(13.0),
+                    )
+                    .frame(false),
+                );
+                if close_btn.clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if close_btn.hovered() {
+                    ui.painter().rect_filled(
+                        close_btn.rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(232, 17, 35, 180),
                     );
+                }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn_size = egui::vec2(36.0, 24.0);
+                let max_label = if self.is_maximized { "[ ]" } else { "[ ]" };
+                let max_btn = ui.put(
+                    regions.controls[1],
+                    egui::Button::new(
+                        egui::RichText::new(max_label)
+                            .color(egui::Color32::from_gray(200))
+                            .size(11.0),
+                    )
+                    .frame(false),
+                );
+                if max_btn.clicked() {
+                    self.is_maximized = !self.is_maximized;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.is_maximized));
+                    self.settings.maximized = self.is_maximized;
+                    self.settings.save();
+                }
 
-                        let close_btn = ui.add_sized(
-                            btn_size,
-                            egui::Button::new(
-                                egui::RichText::new("X")
-                                    .color(egui::Color32::from_gray(200))
-                                    .size(13.0),
-                            )
-                            .frame(false),
-                        );
-                        if close_btn.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        if close_btn.hovered() {
-                            ui.painter().rect_filled(
-                                close_btn.rect,
-                                0.0,
-                                egui::Color32::from_rgba_unmultiplied(232, 17, 35, 180),
-                            );
-                        }
-
-                        let max_label = if self.is_maximized { "[ ]" } else { "[ ]" };
-                        let max_btn = ui.add_sized(
-                            btn_size,
-                            egui::Button::new(
-                                egui::RichText::new(max_label)
-                                    .color(egui::Color32::from_gray(200))
-                                    .size(11.0),
-                            )
-                            .frame(false),
-                        );
-                        if max_btn.clicked() {
-                            self.is_maximized = !self.is_maximized;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(
-                                self.is_maximized,
-                            ));
-                        }
-
-                        let min_btn = ui.add_sized(
-                            btn_size,
-                            egui::Button::new(
-                                egui::RichText::new("_")
-                                    .color(egui::Color32::from_gray(200))
-                                    .size(13.0),
-                            )
-                            .frame(false),
-                        );
-                        if min_btn.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                    });
-                });
+                let min_btn = ui.put(
+                    regions.controls[0],
+                    egui::Button::new(
+                        egui::RichText::new("_")
+                            .color(egui::Color32::from_gray(200))
+                            .size(13.0),
+                    )
+                    .frame(false),
+                );
+                if min_btn.clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
             });
     }
 
@@ -1740,17 +1804,18 @@ impl eframe::App for ViewerApp {
                         self.handle_zoom_input(&response, available);
                         self.handle_mouse_pan(&response, available);
                     } else if let Some(previous) = &self.loading_image {
-                        let (_, painter) = ui.allocate_painter(available, egui::Sense::hover());
+                        let (response, painter) =
+                            ui.allocate_painter(available, egui::Sense::hover());
                         image_decode::paint_textured_rect(
                             &painter,
                             previous.texture.texture_id,
                             previous.rect,
                             &previous.uvs,
                         );
+                        media_overlay::paint(ui, response.rect, MediaOverlay::Loading);
                     } else if self.cache.is_loading() {
-                        ui.centered_and_justified(|ui| {
-                            ui.spinner();
-                        });
+                        let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+                        media_overlay::paint(ui, rect, MediaOverlay::Loading);
                     }
                 } else if self.file_list.is_none() {
                     ui.centered_and_justified(|ui| {
@@ -1821,47 +1886,27 @@ impl ViewerApp {
             .video_player
             .as_ref()
             .is_some_and(|p| matches!(p.state, PlaybackState::Finished));
-        if is_finished {
-            if was_playing {
-                // Let the next update handle slideshow advancement after EOF.
-                ui.ctx().request_repaint();
-            }
-            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::hover());
-            ui.painter().rect_filled(
-                egui::Rect::from_center_size(rect.center(), egui::vec2(24.0, 24.0)),
-                2.0,
-                egui::Color32::LIGHT_GRAY,
-            );
-            response.on_hover_text("停止");
-            return;
-        }
-        if self.video_player.as_ref().is_some_and(|p| p.is_buffering()) {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-            });
+        if is_finished && was_playing {
+            // Let the next update handle slideshow advancement after EOF.
             ui.ctx().request_repaint();
-            return;
         }
-
-        let tex_id = match self.video_texture_id {
-            Some(id) => id,
-            None => return,
-        };
-        let img_size = match self.image_size {
-            Some(s) => s,
-            None => return,
-        };
-
-        let center = ui.available_rect_before_wrap().center();
-        let image_rect = self.compute_display_rect(&img_size, available, center);
-
+        let is_buffering = self.video_player.as_ref().is_some_and(|p| p.is_buffering());
         let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
-
-        let uvs = self.transform.rotated_uvs();
-        image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
-
-        self.handle_zoom_input(&response, available);
-        self.handle_mouse_pan(&response, available);
+        if let (Some(tex_id), Some(img_size)) = (self.video_texture_id, self.image_size) {
+            let image_rect =
+                self.compute_display_rect(&img_size, available, response.rect.center());
+            let uvs = self.transform.rotated_uvs();
+            image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
+            if !is_buffering {
+                self.handle_zoom_input(&response, available);
+                self.handle_mouse_pan(&response, available);
+            }
+        }
+        if is_finished {
+            media_overlay::paint(ui, response.rect, MediaOverlay::Stopped);
+        } else if is_buffering {
+            media_overlay::paint(ui, response.rect, MediaOverlay::Loading);
+        }
 
         let scroll_delta = response.ctx.input(|i| i.raw_scroll_delta.y);
         if scroll_delta.abs() > 0.0 && response.hovered() {

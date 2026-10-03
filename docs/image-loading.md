@@ -12,6 +12,8 @@ position remain visible until the new image is ready. At most one previous
 texture is retained, independently of nearby-cache eviction. It is released on
 replacement, a load error, or switching to video. The initial load, with no
 previous image, still shows a spinner.
+The loading spinner is centered over a small translucent backdrop on top of the
+retained image. It does not replace or dim the entire image.
 
 Folder changes invalidate results from the previous cache generation. Selecting
 a video cancels queued image work. Decode failures belong to the requested path
