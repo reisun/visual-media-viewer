@@ -956,7 +956,12 @@ impl ViewerApp {
                 } else {
                     status_galley.size().x
                 };
-                let regions = crate::title_bar::layout(bar, count_galley.size().x, status_width);
+                let regions = crate::title_bar::layout(
+                    bar,
+                    path_galley.size().x,
+                    count_galley.size().x,
+                    status_width,
+                );
                 let drag_rect = egui::Rect::from_min_max(
                     bar.min,
                     egui::pos2(regions.controls[0].left(), bar.bottom()),
@@ -1019,9 +1024,6 @@ impl ViewerApp {
                     count_galley,
                     color,
                 );
-                if bar_response.hovered() {
-                    bar_response.clone().on_hover_text(&full_path);
-                }
 
                 let close_btn = ui.put(
                     regions.controls[2],

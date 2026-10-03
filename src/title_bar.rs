@@ -7,7 +7,7 @@ pub struct TitleLayout {
     pub controls: [Rect; 3],
 }
 
-pub fn layout(bar: Rect, count_width: f32, status_width: f32) -> TitleLayout {
+pub fn layout(bar: Rect, path_width: f32, count_width: f32, status_width: f32) -> TitleLayout {
     let button_width = 36.0_f32.min(bar.width() / 3.0);
     let controls = std::array::from_fn(|i| {
         let right = bar.right() - (2 - i) as f32 * button_width;
@@ -17,19 +17,30 @@ pub fn layout(bar: Rect, count_width: f32, status_width: f32) -> TitleLayout {
         )
     });
     let content_right = (controls[0].left() - 8.0).max(bar.left());
-    let count_left = (content_right - count_width).max(bar.left());
+    let available = (content_right - bar.left()).max(0.0);
+    let count_width = count_width.min(available);
+    let status_gap = if status_width > 0.0 { 8.0 } else { 0.0 };
+    let status_width = status_width
+        .min((available - count_width - status_gap - 8.0 - path_width.min(64.0)).max(0.0));
+    let fits = path_width + 8.0 + count_width + status_gap + status_width <= available;
+    let count_left = if fits {
+        bar.left() + path_width + 8.0
+    } else {
+        (content_right - count_width - status_gap - status_width).max(bar.left())
+    };
     let count = Rect::from_min_max(
         pos2(count_left, bar.top()),
-        pos2(content_right, bar.bottom()),
+        pos2(count_left + count_width, bar.bottom()),
     );
-    let status_right = (count_left - 8.0).max(bar.left());
-    let available = status_right - bar.left();
-    let status_width = status_width.min((available - 64.0).max(0.0));
+    let status_left = (count.right() + status_gap).min(content_right);
     let status = Rect::from_min_max(
-        pos2(status_right - status_width, bar.top()),
-        pos2(status_right, bar.bottom()),
+        pos2(status_left, bar.top()),
+        pos2(
+            (status_left + status_width).min(content_right),
+            bar.bottom(),
+        ),
     );
-    let path_right = (status.left() - if status_width > 0.0 { 8.0 } else { 0.0 }).max(bar.left());
+    let path_right = (count.left() - 8.0).max(bar.left());
     let path = Rect::from_min_max(bar.min, pos2(path_right, bar.bottom()));
     TitleLayout {
         path,
@@ -73,16 +84,29 @@ mod tests {
     fn text_regions_never_overlap_controls_or_each_other() {
         for width in [240.0, 400.0, 800.0] {
             let bar = Rect::from_min_size(pos2(8.0, 0.0), egui::vec2(width - 16.0, 28.0));
-            let regions = layout(bar, 70.0, 300.0);
-            assert!(regions.path.right() <= regions.status.left());
-            assert!(regions.status.right() <= regions.count.left());
-            assert!(regions.count.right() <= regions.controls[0].left());
+            let regions = layout(bar, 1000.0, 70.0, 300.0);
+            assert!(regions.path.right() <= regions.count.left());
+            assert!(regions.count.right() <= regions.status.left());
+            assert!(regions.status.right() <= regions.controls[0].left());
             assert_eq!(regions.count.width(), 70.0);
             for button in regions.controls {
                 assert!(bar.contains_rect(button));
                 assert_eq!(button.width(), 36.0);
             }
         }
+    }
+
+    #[test]
+    fn short_title_keeps_metadata_after_path_and_long_title_docks_it() {
+        let bar = Rect::from_min_size(pos2(8.0, 0.0), egui::vec2(784.0, 28.0));
+        let short = layout(bar, 100.0, 70.0, 150.0);
+        assert_eq!(short.path.width(), 100.0);
+        assert_eq!(short.count.left(), short.path.right() + 8.0);
+        assert_eq!(short.status.left(), short.count.right() + 8.0);
+        assert!(short.status.right() < short.controls[0].left() - 8.0);
+        let long = layout(bar, 1000.0, 70.0, 150.0);
+        assert_eq!(long.status.right(), long.controls[0].left() - 8.0);
+        assert!(long.path.width() < 1000.0);
     }
 
     #[test]
