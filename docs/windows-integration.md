@@ -122,7 +122,9 @@ thumbnail for some files the full viewer can open.
 ## Build and verification
 
 `./scripts/build.sh check` checks both Windows targets. `./scripts/build.sh release`
-builds and copies the exe, provider DLL, FFmpeg DLLs and licenses into `dist`.
+builds and copies only the exe, provider DLL, FFmpeg DLLs and licenses into
+`dist/release`. Diagnostic tools remain in `scripts/windows-diagnostics` and
+are not part of the official ZIP. Packaging is documented in `releasing.md`.
 Keep both Cargo.lock files. Future version changes must update the root and
 `shell-thumbnail` package versions together.
 
@@ -139,7 +141,7 @@ small/large windows, real image/video thumbnail decoding, EOF, RPC boundaries
 and resource limits. Native tests do not activate Windows COM or alter the
 Windows registry.
 
-On Windows, run `powershell -File scripts/test-windows-shell.ps1` for a direct COM
+On Windows, run `powershell -File scripts/windows-diagnostics/test-windows-shell.ps1` for a direct COM
 smoke test without registry changes. Add `-NativeImagesOnly` to check generated
 PNG/JPEG thumbnails with only the provider DLL present, proving the fast path
 does not require the worker executable. The script reports generation time and
@@ -156,7 +158,10 @@ Verify playback and seeking remain stable while registration work runs.
 
 An enabled checkbox confirms registration, not successful DLL activation or
 thumbnail extraction. If no thumbnails appear even after updating components,
-run `diagnose-windows-thumbnails.cmd` from the extracted distribution. It records
+run `scripts/windows-diagnostics/diagnose-windows-thumbnails.cmd` from the source
+checkout. Diagnostic scripts are not included in official releases. By default,
+they inspect `dist/release`; to inspect another extracted release, invoke the
+PowerShell script with `-DistributionDirectory <folder>`. It records
 Windows thumbnail settings, effective extension handlers, component presence,
 direct provider tests and a forced Windows Shell extraction of generated test
 images. Child probes have time limits so a blocked extraction does not stop the

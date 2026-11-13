@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -33,23 +33,19 @@ if [ ! -f "$EXE_PATH" ]; then
     exit 1
 fi
 
-DIST_DIR="$PROJECT_DIR/dist"
+DIST_DIR="$PROJECT_DIR/dist/$PROFILE"
 mkdir -p "$DIST_DIR"
 cp "$EXE_PATH" "$DIST_DIR/"
 
-DLL_COUNT=$(find "$OUT_DIR" -maxdepth 1 -name "*.dll" -type f 2>/dev/null | wc -l)
-if [ "$DLL_COUNT" -gt 0 ]; then
-    cp "$OUT_DIR"/*.dll "$DIST_DIR/"
-    echo "Copied $DLL_COUNT FFmpeg DLL(s) to dist/"
-else
-    echo "WARNING: No FFmpeg DLLs found in $OUT_DIR"
-fi
+for name in VisualMediaViewerThumbnail.dll avcodec-61.dll avdevice-61.dll \
+    avfilter-10.dll avformat-61.dll avutil-59.dll swresample-5.dll swscale-8.dll; do
+    cp "$OUT_DIR/$name" "$DIST_DIR/"
+done
 
-cp "$PROJECT_DIR/licenses/"* "$DIST_DIR/"
+for name in LGPL-2.1.txt THIRD_PARTY_LICENSES.txt; do
+    cp "$PROJECT_DIR/licenses/$name" "$DIST_DIR/"
+done
 cp "$PROJECT_DIR/LICENSE" "$DIST_DIR/LICENSE.txt"
-cp "$PROJECT_DIR/scripts/test-windows-shell.ps1" "$DIST_DIR/"
-cp "$PROJECT_DIR/scripts/diagnose-windows-thumbnails.ps1" "$DIST_DIR/"
-cp "$PROJECT_DIR/scripts/diagnose-windows-thumbnails.cmd" "$DIST_DIR/"
 
 echo ""
 echo "=== Build successful [$PROFILE] ==="
