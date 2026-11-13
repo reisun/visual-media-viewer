@@ -186,6 +186,7 @@ struct DialogMessage {
 }
 
 pub struct ViewerApp {
+    shell_ui: crate::shell_ui::ShellIntegrationUi,
     initial_open: crate::startup::DeferredFileOpen,
     pending_image_presented: Option<PathBuf>,
     image_size: Option<[usize; 2]>,
@@ -235,6 +236,7 @@ impl ViewerApp {
         };
 
         Self {
+            shell_ui: crate::shell_ui::ShellIntegrationUi::default(),
             initial_open: crate::startup::DeferredFileOpen::new(initial_path),
             pending_image_presented: None,
             image_size: None,
@@ -1110,6 +1112,11 @@ impl ViewerApp {
                 egui::ScrollArea::vertical()
                     .max_height(max_menu_height.max(200.0))
                     .show(ui, |ui| {
+                        if ui.button("Windowsとの連携...").clicked() {
+                            self.shell_ui.open(ctx);
+                            self.show_titlebar_menu = false;
+                        }
+                        ui.separator();
                         ui.label(egui::RichText::new("リスト").strong().size(13.0));
                         ui.separator();
 
@@ -1588,7 +1595,9 @@ impl eframe::App for ViewerApp {
         }
 
         {
-            let modal_open = self.pending_folder_delete.is_some() || self.dialog_message.is_some();
+            let modal_open = self.pending_folder_delete.is_some()
+                || self.dialog_message.is_some()
+                || self.shell_ui.is_open();
             let is_video = self.video_player.is_some();
             let nav = if modal_open {
                 None
@@ -1860,6 +1869,7 @@ impl eframe::App for ViewerApp {
 
         self.draw_folder_delete_dialog(ctx);
         self.draw_dialog_message(ctx);
+        self.shell_ui.draw(ctx);
         if self.cache.is_loading()
             || self.initial_open.is_pending()
             || self.pending_image_presented.is_some()

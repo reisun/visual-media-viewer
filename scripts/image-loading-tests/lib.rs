@@ -9,6 +9,10 @@ mod file_list;
 mod image_decode;
 #[path = "../../src/media_overlay.rs"]
 mod media_overlay;
+#[path = "../../src/shell_integration.rs"]
+mod shell_integration;
+#[path = "../../src/shell_ui.rs"]
+mod shell_ui;
 #[path = "../../src/startup.rs"]
 mod startup;
 #[path = "../../src/title_bar.rs"]
