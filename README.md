@@ -72,7 +72,10 @@ Docker ベースのクロスコンパイル（Linux → Windows x86_64）:
 ./scripts/build.sh release
 ```
 
-出力: `dist/VisualMediaViewer.exe`
+出力: `dist/release/VisualMediaViewer.exe`
+
+正式ZIPの作成・検証手順と資材の配置は [releasing.md](docs/releasing.md) を参照。
+診断・検証スクリプトは `scripts/windows-diagnostics/` で管理し、正式ZIPには同梱しません。
 
 ### 必要環境
 

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $DistributionDirectory = (Join-Path $PSScriptRoot '..\dist'),
+    [string] $DistributionDirectory = (Join-Path $PSScriptRoot '..\..\dist\release'),
     [string] $MediaPath,
     [switch] $NativeImagesOnly
 )
