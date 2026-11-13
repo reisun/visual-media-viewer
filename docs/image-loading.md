@@ -6,6 +6,12 @@ Image selection submits a request instead of decoding on the UI thread. The
 cache runs at most one decode at a time, prioritizes the latest selected image,
 and keeps a bounded queue of nearby files. An already running codec operation
 cannot be interrupted; the latest selection runs after that operation finishes.
+Queued neighbor decoding waits until the selected image has been drawn and the
+next native frame begins. Selection changes (including cache hits), folder
+changes and switching to video reset this permission; stale presentation
+notifications cannot release another selection's queue. Background GPU uploads
+are likewise restricted to the selected image until that first draw is submitted.
+The UI requests the follow-up frame so prefetch resumes even without user input.
 While work is pending, the UI schedules repaint polling every 16 milliseconds.
 When navigating between images, the last displayed texture and its display
 position remain visible until the new image is ready. At most one previous

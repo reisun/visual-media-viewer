@@ -187,6 +187,7 @@ struct DialogMessage {
 
 pub struct ViewerApp {
     initial_open: crate::startup::DeferredFileOpen,
+    pending_image_presented: Option<PathBuf>,
     image_size: Option<[usize; 2]>,
     preview_dim: u32,
     file_list: Option<FileList>,
@@ -235,6 +236,7 @@ impl ViewerApp {
 
         Self {
             initial_open: crate::startup::DeferredFileOpen::new(initial_path),
+            pending_image_presented: None,
             image_size: None,
             preview_dim: 1,
             file_list: None,
@@ -294,9 +296,13 @@ impl ViewerApp {
     }
 
     fn pre_upload_nearby_textures(&mut self) {
+        let preload_allowed = self.cache.can_preload();
         let nearby = match self.file_list.as_ref() {
             Some(fl) => {
                 let mut paths = fl.nearby_paths(3);
+                if !preload_allowed {
+                    paths.retain(|path| Some(path.as_path()) == fl.current_path());
+                }
                 paths.sort_by_key(|path| Some(path.as_path()) != fl.current_path());
                 paths
             }
@@ -463,6 +469,7 @@ impl ViewerApp {
     }
 
     fn load_current_image(&mut self) {
+        self.pending_image_presented = None;
         if let Some((path, rect, uvs)) = self.displayed_image.take() {
             if let Some(texture) = self.texture_cache.remove(&path) {
                 self.clear_loading_image();
@@ -1521,6 +1528,10 @@ impl eframe::App for ViewerApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {
         // This hook runs once per native frame, unlike multipass UI layout.
         self.initial_open.begin_frame();
+        // Resume background work only after the selected image's draw was submitted.
+        if let Some(path) = self.pending_image_presented.take() {
+            self.cache.mark_presented(&path);
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -1813,6 +1824,9 @@ impl eframe::App for ViewerApp {
                             ui.allocate_painter(available, egui::Sense::click_and_drag());
 
                         let uvs = self.transform.rotated_uvs();
+                        if !self.cache.can_preload() {
+                            self.pending_image_presented = Some(path.clone());
+                        }
                         self.displayed_image = Some((path, image_rect, uvs));
                         image_decode::paint_textured_rect(&painter, tex_id, image_rect, &uvs);
 
@@ -1846,7 +1860,10 @@ impl eframe::App for ViewerApp {
 
         self.draw_folder_delete_dialog(ctx);
         self.draw_dialog_message(ctx);
-        if self.cache.is_loading() || self.initial_open.is_pending() {
+        if self.cache.is_loading()
+            || self.initial_open.is_pending()
+            || self.pending_image_presented.is_some()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
@@ -1891,6 +1908,7 @@ impl ViewerApp {
         let uploaded_revision = self.uploaded_video_revision;
         let new_frame = self.video_player.as_mut().and_then(|p| {
             let (revision, f) = p.poll_frame_for_upload(av_offset, uploaded_revision)?;
+            // Keep the immutable pixels alive through upload without copying them.
             Some((revision, f.rgba.clone(), f.width, f.height))
         });
 

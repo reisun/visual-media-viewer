@@ -36,6 +36,7 @@ pub struct ImageCache {
     sender: mpsc::Sender<DecodeResult>,
     active: Option<Request>,
     current: Option<Request>,
+    current_presented: bool,
     queue: VecDeque<Request>,
     errors: HashMap<PathBuf, String>,
     generation: u64,
@@ -55,6 +56,7 @@ impl ImageCache {
             sender,
             active: None,
             current: None,
+            current_presented: false,
             queue: VecDeque::new(),
             errors: HashMap::new(),
             generation: 0,
@@ -75,7 +77,23 @@ impl ImageCache {
 
     pub fn cancel_current(&mut self) {
         self.current = None;
+        self.current_presented = false;
         self.queue.clear();
+    }
+
+    pub fn can_preload(&self) -> bool {
+        self.current.is_some() && self.current_presented
+    }
+
+    pub fn mark_presented(&mut self, path: &Path) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|request| request.path == path)
+        {
+            self.current_presented = true;
+            self.start_next();
+        }
     }
 
     pub fn get(&mut self, path: &Path) -> Option<&egui::ColorImage> {
@@ -125,6 +143,7 @@ impl ImageCache {
             self.preload_dim = Some(dim.max(1).min(self.max_texture_dim));
         }
         if self.current.as_ref().is_none_or(|r| r.path != path) {
+            self.current_presented = false;
             self.queue.clear();
             self.errors.remove(&path);
         }
@@ -165,7 +184,7 @@ impl ImageCache {
             return;
         }
         let mut next = self.current.as_ref().filter(|r| self.needed(r)).cloned();
-        while next.is_none() && self.total_bytes < self.max_bytes {
+        while next.is_none() && self.can_preload() && self.total_bytes < self.max_bytes {
             let Some(candidate) = self.queue.pop_front() else {
                 break;
             };
@@ -425,5 +444,57 @@ mod tests {
             PathBuf::from("latest.jpg")
         );
         assert_eq!(cache.queue.len(), 1);
+    }
+
+    #[test]
+    fn neighbors_wait_until_current_image_has_been_presented() {
+        let mut cache = ImageCache::new(1024, 8192);
+        let current = request("current.jpg", Some(2));
+        cache.active = Some(current.clone());
+        cache.request(current.path.clone(), Some(2));
+        cache.preload(vec!["neighbor.jpg".into()]);
+        cache
+            .sender
+            .send(DecodeResult {
+                request: current.clone(),
+                result: Ok(image(2, 2)),
+            })
+            .unwrap();
+
+        assert_eq!(cache.poll(), vec![current.path.clone()]);
+        assert!(cache.active.is_none());
+        assert_eq!(cache.queue.len(), 1);
+        assert!(!cache.can_preload());
+        cache.mark_presented(Path::new("stale.jpg"));
+        assert!(cache.active.is_none());
+
+        cache.mark_presented(&current.path);
+        assert!(cache.can_preload());
+        assert_eq!(
+            cache.active.as_ref().unwrap().path,
+            PathBuf::from("neighbor.jpg")
+        );
+    }
+
+    #[test]
+    fn cached_selection_and_folder_change_require_a_new_presentation() {
+        let mut cache = ImageCache::new(1024, 8192);
+        let first = request("first.jpg", None);
+        let next = request("next.jpg", None);
+        cache.current = Some(first.clone());
+        cache.insert(&first, image(2, 2));
+        cache.insert(&next, image(2, 2));
+        cache.mark_presented(&first.path);
+        assert!(cache.can_preload());
+
+        cache.request(next.path.clone(), None);
+        cache.preload(vec!["neighbor.jpg".into()]);
+        cache.mark_presented(&first.path);
+        assert!(!cache.can_preload());
+        assert!(cache.active.is_none());
+        cache.clear();
+        cache.mark_presented(&next.path);
+        assert!(!cache.can_preload());
+        assert!(cache.queue.is_empty());
     }
 }

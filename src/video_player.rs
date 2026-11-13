@@ -12,8 +12,74 @@ thread_local! {
     static INPUT_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[derive(Clone)]
+pub struct FramePixels(Arc<RecyclablePixels>);
+
+struct RecyclablePixels {
+    data: Vec<u8>,
+    recycle_tx: Option<mpsc::SyncSender<Vec<u8>>>,
+}
+
+impl Drop for RecyclablePixels {
+    fn drop(&mut self) {
+        if let Some(tx) = &self.recycle_tx {
+            // Never block rendering or shutdown when the decoder has enough spares.
+            let _ = tx.try_send(std::mem::take(&mut self.data));
+        }
+    }
+}
+
+impl std::ops::Deref for FramePixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0.data
+    }
+}
+
+impl AsRef<[u8]> for FramePixels {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl From<Vec<u8>> for FramePixels {
+    fn from(data: Vec<u8>) -> Self {
+        Self(Arc::new(RecyclablePixels {
+            data,
+            recycle_tx: None,
+        }))
+    }
+}
+
+struct FrameBufferPool {
+    recycle_tx: mpsc::SyncSender<Vec<u8>>,
+    recycle_rx: mpsc::Receiver<Vec<u8>>,
+}
+
+impl FrameBufferPool {
+    fn new() -> Self {
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel(4);
+        Self {
+            recycle_tx,
+            recycle_rx,
+        }
+    }
+
+    fn copy_frame(&self, frame: &ffmpeg_next::frame::Video) -> (FramePixels, u32, u32) {
+        let mut data = self.recycle_rx.try_recv().unwrap_or_default();
+        let (width, height) = copy_rgba_frame(frame, &mut data);
+        let pixels = FramePixels(Arc::new(RecyclablePixels {
+            data,
+            recycle_tx: Some(self.recycle_tx.clone()),
+        }));
+        (pixels, width, height)
+    }
+}
+
+#[derive(Clone)]
 pub struct VideoFrame {
-    pub rgba: Vec<u8>,
+    pub rgba: FramePixels,
     pub width: u32,
     pub height: u32,
     pub pts: f64,
@@ -594,6 +660,12 @@ impl VideoPlayer {
             }
             if !self.prebuffer_queue.is_empty() {
                 self.begin_prebuffer();
+                // Display the first frame without consuming buffered playback data
+                // or starting the audio/clock before the existing buffer threshold.
+                if self.current_frame.is_none() {
+                    self.current_frame = self.prebuffer_queue.front().cloned();
+                    self.frame_revision += 1;
+                }
             }
             if self.prebuffer_ready() || disconnected {
                 log::info!(
@@ -602,13 +674,12 @@ impl VideoPlayer {
                     disconnected
                 );
                 self.finish_prebuffer();
+                // This is the frame already shown during buffering, so its upload
+                // revision stays unchanged when regular playback starts.
                 self.current_frame = self.prebuffer_queue.pop_front();
-                if self.current_frame.is_some() {
-                    self.frame_revision += 1;
-                }
                 self.buffered_frame = self.prebuffer_queue.pop_front();
             } else {
-                return None;
+                return self.current_frame.as_ref();
             }
         }
 
@@ -733,10 +804,12 @@ impl VideoPlayer {
             }
             PlaybackState::Paused => {
                 self.state = PlaybackState::Playing;
-                if let Some(ref session) = self.session {
-                    session.audio_paused.store(false, Ordering::Relaxed);
-                    if let Some(ref stream) = session.audio_stream {
-                        let _ = stream.play();
+                if !self.awaiting_first_frame {
+                    if let Some(ref session) = self.session {
+                        session.audio_paused.store(false, Ordering::Relaxed);
+                        if let Some(ref stream) = session.audio_stream {
+                            let _ = stream.play();
+                        }
                     }
                 }
                 self.playback_start = Instant::now();
@@ -952,6 +1025,7 @@ fn copy_rgba_frame(rgba_frame: &ffmpeg_next::frame::Video, buf: &mut Vec<u8>) ->
     let row_bytes = width as usize * 4;
     let data = rgba_frame.data(0);
     buf.clear();
+    buf.reserve(row_bytes * height as usize);
     if stride == row_bytes {
         buf.extend_from_slice(&data[..row_bytes * height as usize]);
     } else {
@@ -1213,7 +1287,7 @@ fn video_decoder_loop(
 
     let mut decoded_frame = ffmpeg_next::frame::Video::empty();
     let mut rgba_frame = ffmpeg_next::frame::Video::empty();
-    let mut reuse_buf: Vec<u8> = Vec::new();
+    let frame_buffers = FrameBufferPool::new();
 
     let mut video_seek_target: Option<f64> = if seek_target > 0.1 {
         Some(seek_target)
@@ -1317,7 +1391,6 @@ fn video_decoder_loop(
                     ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
                 ) {
                     Ok(s) => {
-                        reuse_buf = Vec::with_capacity((out_w as usize) * (out_h as usize) * 4);
                         scaler = Some(s);
                     }
                     Err(e) => {
@@ -1334,9 +1407,9 @@ fn video_decoder_loop(
             {
                 continue;
             }
-            let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
+            let (rgba, width, height) = frame_buffers.copy_frame(&rgba_frame);
             let vframe = VideoFrame {
-                rgba: reuse_buf.clone(),
+                rgba,
                 width,
                 height,
                 pts,
@@ -1376,10 +1449,10 @@ fn video_decoder_loop(
     while video_decoder.receive_frame(&mut decoded_frame).is_ok() {
         if let Some(ref mut s) = scaler {
             if s.run(&decoded_frame, &mut rgba_frame).is_ok() {
-                let (width, height) = copy_rgba_frame(&rgba_frame, &mut reuse_buf);
+                let (rgba, width, height) = frame_buffers.copy_frame(&rgba_frame);
                 let pts = decoded_frame.pts().unwrap_or(0) as f64 * video_time_base;
                 let _ = frame_tx.send(VideoFrame {
-                    rgba: reuse_buf.clone(),
+                    rgba,
                     width,
                     height,
                     pts,
@@ -1467,11 +1540,30 @@ mod tests {
 
     fn frame(value: u8) -> VideoFrame {
         VideoFrame {
-            rgba: vec![value; 4],
+            rgba: vec![value; 4].into(),
             width: 1,
             height: 1,
             pts: 0.0,
         }
+    }
+
+    fn attach_test_session(
+        player: &mut VideoPlayer,
+    ) -> (mpsc::Sender<VideoFrame>, Arc<AtomicBool>) {
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let (cmd_tx, _) = mpsc::channel();
+        let audio_paused = Arc::new(AtomicBool::new(true));
+        player.session = Some(PlaybackSession {
+            frame_rx,
+            cmd_tx,
+            demuxer_thread: thread::spawn(|| None),
+            video_thread: thread::spawn(|| {}),
+            audio_stream: None,
+            audio_clock: Arc::new(AudioClock::new(2, 48000)),
+            audio_paused: audio_paused.clone(),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        });
+        (frame_tx, audio_paused)
     }
 
     #[test]
@@ -1499,6 +1591,171 @@ mod tests {
         player.prebuffer_deadline = Some(Instant::now());
         assert_eq!(player.poll_frame_for_upload(0.0, None).unwrap().0, 1);
         assert!(player.poll_frame_for_upload(0.0, Some(1)).is_none());
+    }
+
+    #[test]
+    fn prebuffer_preview_keeps_queue_audio_and_clock_until_eight_frames() {
+        let mut player = test_player();
+        let (_frame_tx, audio_paused) = attach_test_session(&mut player);
+        player.awaiting_first_frame = true;
+        player.playback_start_pts = 2.0;
+        let original_start = player.playback_start;
+        let mut first = frame(7);
+        first.pts = 2.0;
+        player.prebuffer_queue.push_back(first);
+
+        let (revision, preview) = player.poll_frame_for_upload(0.0, None).unwrap();
+        let pixels = preview.rgba.clone();
+        assert_eq!(pixels[0], 7);
+        assert!(player.is_buffering());
+        assert!(audio_paused.load(Ordering::Acquire));
+        assert_eq!(player.playback_start, original_start);
+        assert_eq!(player.current_pts(), 2.0);
+        assert_eq!(player.prebuffer_queue.len(), 1);
+        assert!(Arc::ptr_eq(
+            &pixels.0,
+            &player.prebuffer_queue.front().unwrap().rgba.0
+        ));
+        player.toggle_pause();
+        assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+        player.toggle_pause();
+        assert!(audio_paused.load(Ordering::Acquire));
+
+        for i in 1..7 {
+            let mut next = frame(i);
+            next.pts = 2.0 + i as f64 / 24.0;
+            player.prebuffer_queue.push_back(next);
+        }
+        assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+        assert!(player.is_buffering());
+        assert!(audio_paused.load(Ordering::Acquire));
+
+        let mut eighth = frame(8);
+        eighth.pts = 2.0 + 7.0 / 24.0;
+        player.prebuffer_queue.push_back(eighth);
+        assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+        assert!(!player.is_buffering());
+        assert!(!audio_paused.load(Ordering::Acquire));
+        assert_eq!(player.frame_revision, revision);
+        assert!(Arc::ptr_eq(
+            &pixels.0,
+            &player.current_frame.as_ref().unwrap().rgba.0
+        ));
+
+        player.playback_start = Instant::now() - Duration::from_millis(50);
+        let (next_revision, next) = player.poll_frame_for_upload(0.0, Some(revision)).unwrap();
+        assert!(next_revision > revision);
+        assert_eq!(next.rgba[0], 1);
+    }
+
+    #[test]
+    fn paused_prebuffer_preview_is_retained_and_timeout_starts_playback() {
+        let mut player = test_player();
+        let (_frame_tx, audio_paused) = attach_test_session(&mut player);
+        player.awaiting_first_frame = true;
+        player.prebuffer_queue.push_back(frame(9));
+        let revision = player.poll_frame_for_upload(0.0, None).unwrap().0;
+        player.toggle_pause();
+        player.prebuffer_deadline = Some(Instant::now());
+        assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+        assert!(player.awaiting_first_frame);
+        assert_eq!(player.prebuffer_queue.len(), 1);
+        assert!(audio_paused.load(Ordering::Acquire));
+        player.toggle_pause();
+        assert!(audio_paused.load(Ordering::Acquire));
+        assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+        assert!(!player.awaiting_first_frame);
+        assert!(!audio_paused.load(Ordering::Acquire));
+        assert_eq!(player.current_frame.as_ref().unwrap().rgba[0], 9);
+    }
+
+    #[test]
+    fn short_prebuffer_disconnect_preserves_preview_then_finishes_remaining_frames() {
+        for count in 1..VideoPlayer::PREBUFFER_FRAMES {
+            let mut player = test_player();
+            let (frame_tx, audio_paused) = attach_test_session(&mut player);
+            let audio_clock = player.session.as_ref().unwrap().audio_clock.clone();
+            player.awaiting_first_frame = true;
+            player.playback_start_pts = 2.0;
+            let original_start = player.playback_start;
+            for i in 0..count {
+                let mut queued = frame(i as u8);
+                queued.pts = 2.0 + i as f64 * 10.0;
+                player.prebuffer_queue.push_back(queued);
+            }
+
+            let (revision, preview) = player.poll_frame_for_upload(0.0, None).unwrap();
+            let preview_pixels = preview.rgba.clone();
+            assert_eq!(preview_pixels[0], 0);
+            assert!(player.is_buffering());
+            assert_eq!(player.prebuffer_queue.len(), count);
+            assert_eq!(player.playback_start, original_start);
+            assert_eq!(player.current_pts(), 2.0);
+            assert!(audio_paused.load(Ordering::Acquire));
+            assert!(audio_clock.get().is_none());
+
+            drop(frame_tx);
+            assert!(player.poll_frame_for_upload(0.0, Some(revision)).is_none());
+            assert_eq!(player.frame_revision, revision);
+            assert!(Arc::ptr_eq(
+                &preview_pixels.0,
+                &player.current_frame.as_ref().unwrap().rgba.0
+            ));
+            assert!(!player.is_buffering());
+            assert!(!audio_paused.load(Ordering::Acquire));
+            assert!(audio_clock.get().is_none());
+
+            player.playback_start = Instant::now() - Duration::from_secs(100);
+            player.poll_frame(0.0);
+            assert!(matches!(player.state, PlaybackState::Finished));
+            assert_eq!(player.frame_revision, revision + count as u64 - 1);
+            assert_eq!(
+                player.current_frame.as_ref().unwrap().rgba[0],
+                count as u8 - 1
+            );
+            assert!(player.prebuffer_queue.is_empty());
+            assert!(player.buffered_frame.is_none());
+        }
+    }
+
+    #[test]
+    fn recycled_pixels_wait_for_last_owner_and_preserve_padded_rows() {
+        let pool = FrameBufferPool::new();
+        let mut source = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::RGBA, 3, 2);
+        let stride = source.stride(0);
+        source.data_mut(0).fill(99);
+        source.data_mut(0)[..12].fill(1);
+        source.data_mut(0)[stride..stride + 12].fill(2);
+        let (pixels, width, height) = pool.copy_frame(&source);
+        assert_eq!((width, height), (3, 2));
+        assert_eq!(pixels.as_ref(), &[vec![1; 12], vec![2; 12]].concat());
+        let original_ptr = pixels.as_ptr();
+        let held = pixels.clone();
+        drop(pixels);
+        assert!(pool.recycle_rx.try_recv().is_err());
+        source.data_mut(0).fill(3);
+        let (other, _, _) = pool.copy_frame(&source);
+        assert_ne!(other.as_ptr(), original_ptr);
+        assert_eq!(held[0], 1);
+        drop(held);
+        let (reused, _, _) = pool.copy_frame(&source);
+        assert_eq!(reused.as_ptr(), original_ptr);
+        assert_eq!(reused.as_ref(), &[3; 24]);
+        drop(pool);
+        // Frames may outlive their session; returning to a closed pool is harmless.
+        assert_eq!(reused[0], 3);
+        drop(reused);
+        drop(other);
+    }
+
+    #[test]
+    fn frame_buffer_recycler_retains_at_most_four_spares() {
+        let pool = FrameBufferPool::new();
+        let mut source = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::RGBA, 2, 2);
+        source.data_mut(0).fill(0);
+        let frames: Vec<_> = (0..10).map(|_| pool.copy_frame(&source).0).collect();
+        drop(frames);
+        assert_eq!(pool.recycle_rx.try_iter().count(), 4);
     }
 
     #[test]
