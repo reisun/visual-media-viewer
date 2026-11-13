@@ -4,6 +4,16 @@ Open **Windowsとの連携...** from the title-bar context menu. No registration
 registry inspection happens during normal startup. Registration operations and
 state inspection run on a background thread; playback does not depend on them.
 
+## Application icon
+
+The executable resource and runtime window icon share `assets/icon.ico`.
+Windows taskbar/Alt+Tab also receive an explicit `WM_SETICON(ICON_BIG)` using
+the executable's shared icon resource; winit's ordinary window icon only sets
+`ICON_SMALL`. The shared Windows icon is not destroyed by the application.
+Resource compilation errors fail the build rather than silently shipping an
+executable without its icon. After replacing an icon, an existing pinned
+shortcut may retain a cached image; unpin/re-pin that shortcut if necessary.
+
 ## File associations
 
 **関連付け候補に登録** independently registers this app as a candidate in Windows
