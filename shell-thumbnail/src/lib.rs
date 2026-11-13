@@ -57,7 +57,7 @@ impl Drop for ObjectGuard {
     }
 }
 
-#[implement(IClassFactory)]
+#[implement(IClassFactory, Agile = false)]
 struct Factory {
     _guard: ObjectGuard,
 }
@@ -103,7 +103,9 @@ impl IClassFactory_Impl for Factory_Impl {
     }
 }
 
-#[implement(IInitializeWithStream, IThumbnailProvider)]
+// The retained stream belongs to the creating apartment. Do not expose the
+// macro's default agile marshaler, which would bypass apartment confinement.
+#[implement(IInitializeWithStream, IThumbnailProvider, Agile = false)]
 struct Provider {
     stream: RefCell<Option<IStream>>,
     _guard: ObjectGuard,

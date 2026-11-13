@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string] $DistributionDirectory = (Join-Path $PSScriptRoot '..\dist'),
-    [switch] $ProbeShell
+    [switch] $ProbeShell,
+    [ValidateSet('png', 'jpg')]
+    [string] $ProbeExtension = 'png'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -70,7 +72,9 @@ public static class ThumbnailDiagnostic
     }
     public static void Probe(string path, string label)
     {
-        int apartment = CoInitializeEx(IntPtr.Zero, 2);
+        uint model = System.Threading.Thread.CurrentThread.GetApartmentState()
+            == System.Threading.ApartmentState.MTA ? 0u : 2u;
+        int apartment = CoInitializeEx(IntPtr.Zero, model);
         IntPtr cache = IntPtr.Zero, item = IntPtr.Zero, bitmap = IntPtr.Zero;
         try
         {
@@ -114,11 +118,9 @@ if ($ProbeShell) {
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ('vmv-thumbnail-' + [Guid]::NewGuid().ToString('N'))
     [void] (New-Item -ItemType Directory -Path $temporary)
     try {
-        foreach ($extension in @('png', 'jpg')) {
-            $source = Join-Path $temporary ('test.' + $extension)
-            [ThumbnailDiagnostic]::CreateImage($source, ($extension -eq 'jpg'))
-            [ThumbnailDiagnostic]::Probe($source, $extension)
-        }
+        $source = Join-Path $temporary ('test.' + $ProbeExtension)
+        [ThumbnailDiagnostic]::CreateImage($source, ($ProbeExtension -eq 'jpg'))
+        [ThumbnailDiagnostic]::Probe($source, $ProbeExtension)
     } finally {
         Get-ChildItem -LiteralPath $temporary -File | Remove-Item -Force
         Remove-Item -LiteralPath $temporary -Force
@@ -144,9 +146,9 @@ function Invoke-Probe([string] $Label, [string] $Command) {
     Write-Report ("`r`n=== " + $Label + ' ===')
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = Join-Path $PSHOME 'powershell.exe'
-    $wrapped = "`$ErrorActionPreference = 'Stop'; try { " + $Command + " } catch { Write-Output (`$_.Exception.ToString()); exit 1 }"
+    $wrapped = "`$ErrorActionPreference = 'Stop'; `$ProgressPreference = 'SilentlyContinue'; try { " + $Command + " } catch { Write-Output (`$_.Exception.ToString()); exit 1 }"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapped))
-    $start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $start.Arguments = '-MTA -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -224,8 +226,10 @@ try {
             Invoke-Probe ($entry.Label + ' native-only DLL PNG + JPEG') ($command + ' -NativeImagesOnly')
         } else { Write-Report 'MISSING test-windows-shell.ps1: direct DLL probes skipped.' }
     }
-    Invoke-Probe 'Real Windows Shell PNG + JPEG (normal isolated extraction, not icons)' (
-        '& ' + (Quote-Argument $PSCommandPath) + ' -ProbeShell')
+    foreach ($extension in @('png', 'jpg')) {
+        Invoke-Probe ('Real Windows Shell ' + $extension + ' (MTA; isolated extraction, not icons)') (
+            '& ' + (Quote-Argument $PSCommandPath) + ' -ProbeShell -ProbeExtension ' + $extension)
+    }
     Write-Report "`r`nNo settings were changed, no global cache was deleted, and Explorer was not terminated."
 } catch {
     Write-Report ('Diagnostic error: ' + $_.Exception.ToString())
