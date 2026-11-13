@@ -729,9 +729,15 @@ mod platform {
         result.thumbnails_enabled = result.thumbnail_count == result.total_count && provider_ready;
         result.app_partial = has_app_registration && !result.app_registered;
         result.app_update_available = result.app_registered
-            && text(APP_KEY, "InstalledVersion")?.as_deref() != Some(env!("CARGO_PKG_VERSION"));
+            && (text(APP_KEY, "InstalledVersion")?.as_deref() != Some(env!("CARGO_PKG_VERSION"))
+                || !installed_binaries_match(current_exe.as_deref(), installed.as_deref(), false));
         result.thumbnail_update_available = result.thumbnails_enabled
-            && text(APP_KEY, "ThumbnailVersion")?.as_deref() != Some(env!("CARGO_PKG_VERSION"));
+            && (text(APP_KEY, "ThumbnailVersion")?.as_deref() != Some(env!("CARGO_PKG_VERSION"))
+                || !installed_binaries_match(
+                    current_exe.as_deref(),
+                    thumbnail_dir.as_deref(),
+                    true,
+                ));
         let remaining_provider = provider_path
             .as_ref()
             .is_some_and(|path| own_provider_path(path));
@@ -741,6 +747,25 @@ mod platform {
             || thumbnail_dir.is_some())
             && !result.thumbnails_enabled;
         Ok(result)
+    }
+
+    fn installed_binaries_match(
+        exe: Option<&Path>,
+        directory: Option<&Path>,
+        provider: bool,
+    ) -> bool {
+        let (Some(exe), Some(directory)) = (exe, directory) else {
+            return false;
+        };
+        let mut files = vec![(exe.to_path_buf(), directory.join("VisualMediaViewer.exe"))];
+        if provider {
+            let Some(source) = exe.parent() else {
+                return false;
+            };
+            files.push((source.join(PROVIDER_FILE), directory.join(PROVIDER_FILE)));
+        }
+        // Inspect only on opening/refreshing the integration screen, never during startup.
+        deployment_matches(&files).unwrap_or(false)
     }
 
     pub fn open_default_apps() -> Result<(), String> {

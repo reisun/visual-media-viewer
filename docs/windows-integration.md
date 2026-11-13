@@ -36,6 +36,13 @@ thumbnail settings and cached results can affect actual display. The app does
 not delete the global thumbnail cache. Partial or damaged registration offers
 repair and removal. A valid older installation remains checked and offers an
 update action instead of pretending it is unregistered.
+The update check compares the installed executable/provider with the current
+portable files, including changed builds with the same version number. After
+extracting an updated distribution, use **サムネイル部品を更新** here; replacing
+the portable files alone does not replace the registered copy. Explorer can
+retain the previous DLL until its thumbnail host exits. If it still uses old
+components after updating, close Explorer windows and restart Explorer or sign
+out and back in. No global cache deletion or forced process termination occurs.
 
 Registry changes are journaled and restored on ordinary operation failure.
 Rollback failure is logged, and a process interruption may still leave a partial
@@ -61,9 +68,11 @@ default choice. License files accompany deployed FFmpeg libraries.
 `shell-thumbnail` builds `VisualMediaViewerThumbnail.dll`, a standalone COM server
 implementing `IClassFactory`, `IInitializeWithStream` and `IThumbnailProvider`.
 It imports only Windows system libraries, retaining Windows' default thumbnail
-process isolation. It does not load FFmpeg into Explorer. Decoding runs in a
-hidden, same-directory `VisualMediaViewer.exe --shell-thumbnail-worker --size N`
-process before logging, IPC, GUI, audio or GPU initialization.
+process isolation. It does not load FFmpeg into Explorer. Standard Windows image
+formats use a direct WIC decoding path, avoiding a new executable process and
+stream RPC for each image. Unsupported images and videos use a hidden,
+same-directory `VisualMediaViewer.exe --shell-thumbnail-worker --size N` process
+before logging, IPC, GUI, audio or GPU initialization.
 
 The provider services bounded read/seek/size requests against the supplied
 `IStream` on the COM apartment thread. This avoids copying entire large videos
@@ -72,18 +81,25 @@ the provider creates a top-down, premultiplied BGRA HBITMAP for Windows. The
 original stream position is restored when seek is available. References and
 server locks control `DllCanUnloadNow`.
 
-JPEG uses reduced-resolution TurboJPEG decoding. Other supported images use
-the image decoder; HEIC/HEIF uses installed Windows WIC codecs, with scaling
+The native path selects the built-in JPEG/PNG/GIF/BMP/TIFF decoder by signature
+and scales before RGBA conversion. It does not invoke arbitrary installed codecs.
+The worker's JPEG fallback uses reduced-resolution TurboJPEG decoding. Other
+supported images use the image decoder; HEIC/HEIF uses installed Windows WIC codecs, with scaling
 before output conversion. Video uses a separate FFmpeg custom-AVIO decoder,
 including delayed-frame draining. Only supported container demuxers are allowed,
 external protocols are disabled, and no playback state is reused.
+Image input uses bulk reads rather than many small pipe requests. Video headers
+with sufficient decoder metadata can proceed directly to first-frame decoding;
+containers requiring stream analysis retain the existing probing fallback.
 
-Results are bounded to 1024 pixels per side. Images have a 128 MiB input/decoded
-allocation limit; video stream reads are capped at 256 MiB cumulatively, with
+Results are bounded to 1024 pixels per side. The native path accepts images up
+to 128 MiB, 32768 pixels per dimension and 64 megapixels. Worker image decoding
+has a 128 MiB input/decoded allocation limit; video stream reads are capped at 256 MiB cumulatively, with
 frame dimensions/pixels and individual FFmpeg allocations bounded. The worker
 has an eight-second I/O budget and the provider kills the child after ten seconds.
-This timeout cannot cancel an OS-level `IStream` call already blocked on a network
-or cloud source. Oversized, malformed, unsupported or slow media falls back to
+The child timeout does not apply to native WIC decoding in Windows' thumbnail
+host and cannot cancel an OS-level `IStream` call blocked on a network or cloud
+source. Oversized, malformed, unsupported or slow media falls back to
 Explorer's normal icon/error behavior. The deadline and limits can prevent a
 thumbnail for some files the full viewer can open.
 
@@ -108,7 +124,11 @@ and resource limits. Native tests do not activate Windows COM or alter the
 Windows registry.
 
 On Windows, run `powershell -File scripts/test-windows-shell.ps1` for a direct COM
-smoke test without registry changes. Then manually check candidate and thumbnail
+smoke test without registry changes. Add `-NativeImagesOnly` to check generated
+PNG/JPEG thumbnails with only the provider DLL present, proving the fast path
+does not require the worker executable. The script reports generation time and
+verifies stream-position restoration as well as pixels and resource cleanup.
+Then manually check candidate and thumbnail
 registration independently, Windows default selection and return-to-app refresh,
 foreign-handler restoration/conflict, interrupted registration repair, update
 without losing the actual ON state, and moving the original portable folder.

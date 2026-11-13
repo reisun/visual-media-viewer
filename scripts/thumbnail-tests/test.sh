@@ -13,6 +13,11 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=160x96:rate=24 
     -t 0.05 -c:v libx264 -pix_fmt yuv420p -bf 3 "$VMV_THUMBNAIL_FIXTURES/short.mp4"
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i sine=frequency=440:sample_rate=48000 \
     -t 1 -c:a aac "$VMV_THUMBNAIL_FIXTURES/audio.m4a"
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=160x96:rate=24 \
+    -t 1 -c:v mpeg2video -f mpegts "$VMV_THUMBNAIL_FIXTURES/fallback.ts"
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=24 \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 -c:v libx264 \
+    -preset ultrafast -crf 18 -c:a aac -movflags +faststart "$VMV_THUMBNAIL_FIXTURES/faststart.mp4"
 export CARGO_TARGET_DIR="$test_dir/build"
 export CARGO_HOME="$test_dir/cargo-home"
 timeout 240s cargo test --manifest-path "$test_dir/Cargo.toml" \

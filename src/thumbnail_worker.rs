@@ -11,6 +11,7 @@ struct RemoteStream<R, W> {
     output: W,
     remaining: u64,
     deadline: Instant,
+    size: Option<u64>,
 }
 
 impl<R: Read, W: Write> RemoteStream<R, W> {
@@ -23,6 +24,9 @@ impl<R: Read, W: Write> RemoteStream<R, W> {
 
     fn size(&mut self) -> io::Result<u64> {
         self.check_budget()?;
+        if let Some(size) = self.size {
+            return Ok(size);
+        }
         self.output.write_all(&[3])?;
         self.output.flush()?;
         let mut value = [0; 8];
@@ -31,6 +35,7 @@ impl<R: Read, W: Write> RemoteStream<R, W> {
         if value == u64::MAX {
             return Err(io::Error::other("Stream size unavailable"));
         }
+        self.size = Some(value);
         Ok(value)
     }
 }
@@ -87,6 +92,7 @@ pub fn run(size: u32) -> Result<(), String> {
         output: io::stdout().lock(),
         remaining: MAX_DECODE,
         deadline: Instant::now() + Duration::from_secs(8),
+        size: None,
     };
     let result = decode(&mut source, size.clamp(1, 1024));
     match result {
@@ -133,20 +139,13 @@ fn decode<R: Read, W: Write>(
     source.rewind().map_err(|e| e.to_string())?;
     if image::guess_format(&signature[..count]).is_ok() {
         if signature.starts_with(&[0xff, 0xd8]) && source.size().unwrap_or(u64::MAX) <= MAX_SOURCE {
-            let mut bytes = Vec::new();
-            (&mut *source)
-                .take(MAX_SOURCE + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            if bytes.len() as u64 > MAX_SOURCE {
-                return Err("Image source exceeds size limit".into());
-            }
+            let bytes = read_image_source(source)?;
             if let Ok(thumbnail) = jpeg_thumbnail(&bytes, size) {
                 return Ok(thumbnail);
             }
             source.rewind().map_err(|e| e.to_string())?;
         }
-        let mut reader = image::ImageReader::new(BufReader::new(source))
+        let mut reader = image::ImageReader::new(BufReader::with_capacity(256 * 1024, source))
             .with_guessed_format()
             .map_err(|e| e.to_string())?;
         let mut limits = image::Limits::default();
@@ -169,17 +168,37 @@ fn decode<R: Read, W: Write>(
         if source.size().map_err(|e| e.to_string())? > MAX_SOURCE {
             return Err("Image source exceeds size limit".into());
         }
-        let mut bytes = Vec::new();
-        (&mut *source)
-            .take(MAX_SOURCE + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_SOURCE {
-            return Err("Image source exceeds size limit".into());
-        }
+        let bytes = read_image_source(source)?;
         return crate::wic_decoder::decode_thumbnail_from_bytes(&bytes, size);
     }
     video_thumbnail(source, size)
+}
+
+fn read_image_source<R: Read, W: Write>(
+    source: &mut RemoteStream<R, W>,
+) -> Result<Vec<u8>, String> {
+    let capacity = source.size().map_err(|e| e.to_string())?;
+    if capacity > MAX_SOURCE {
+        return Err("Image source exceeds size limit".into());
+    }
+    // Fixed-size reads avoid read_to_end's small initial requests across the pipe.
+    let mut bytes = Vec::with_capacity(capacity as usize);
+    let mut buffer = vec![0; MAX_READ];
+    loop {
+        let limit = buffer
+            .len()
+            .min((MAX_SOURCE + 1 - bytes.len() as u64) as usize);
+        let count = source
+            .read(&mut buffer[..limit])
+            .map_err(|e| e.to_string())?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if bytes.len() as u64 > MAX_SOURCE {
+            return Err("Image source exceeds size limit".into());
+        }
+    }
 }
 
 fn fit(width: u32, height: u32, size: u32) -> Result<(u32, u32), String> {
@@ -367,7 +386,9 @@ fn video_thumbnail<R: Read, W: Write>(
     }
     // Input owns the format context; its custom IO remains alive until Input drops.
     let mut input = unsafe { format::context::Input::wrap(context) };
-    if unsafe { av::avformat_find_stream_info(context, std::ptr::null_mut()) } < 0 {
+    if !has_video_decode_metadata(&input)
+        && unsafe { av::avformat_find_stream_info(context, std::ptr::null_mut()) } < 0
+    {
         return Err("Video stream information unavailable".into());
     }
     let stream = input
@@ -431,6 +452,34 @@ fn video_thumbnail<R: Read, W: Write>(
     Err("No decodable frame within thumbnail budget".into())
 }
 
+fn has_video_decode_metadata(input: &ffmpeg_next::format::context::Input) -> bool {
+    use ffmpeg_next::ffi as av;
+    // These containers carry complete codec setup in their headers. Other formats
+    // keep the established analysis path, including MPEG-TS with in-band headers.
+    if !input
+        .format()
+        .name()
+        .split(',')
+        .any(|name| matches!(name, "mov" | "matroska" | "webm"))
+    {
+        return false;
+    }
+    let Some(stream) = input.streams().best(ffmpeg_next::media::Type::Video) else {
+        return false;
+    };
+    unsafe {
+        let parameters = stream.parameters();
+        let parameters = &*parameters.as_ptr();
+        parameters.codec_type == av::AVMediaType::AVMEDIA_TYPE_VIDEO
+            && parameters.codec_id != av::AVCodecID::AV_CODEC_ID_NONE
+            && parameters.width > 0
+            && parameters.height > 0
+            && parameters.extradata_size > 0
+            && !parameters.extradata.is_null()
+            && !av::avcodec_find_decoder(parameters.codec_id).is_null()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +491,8 @@ mod tests {
         response: io::Cursor<Vec<u8>>,
         request: Vec<u8>,
         read_bytes: usize,
+        read_requests: usize,
+        size_requests: usize,
         chunk_limit: usize,
     }
     struct PipeReader(Rc<RefCell<Peer>>);
@@ -462,6 +513,7 @@ mod tests {
             let mut response = Vec::new();
             match request[0] {
                 1 => {
+                    peer.read_requests += 1;
                     let count = u32::from_le_bytes(request[1..5].try_into().unwrap()) as usize;
                     assert!(count <= MAX_READ);
                     let mut bytes = vec![0; count.min(peer.chunk_limit)];
@@ -482,6 +534,7 @@ mod tests {
                     response.extend_from_slice(&peer.source.seek(position)?.to_le_bytes());
                 }
                 3 => {
+                    peer.size_requests += 1;
                     response.extend_from_slice(&(peer.source.get_ref().len() as u64).to_le_bytes())
                 }
                 _ => panic!("Invalid RPC"),
@@ -496,6 +549,8 @@ mod tests {
             response: io::Cursor::new(Vec::new()),
             request: Vec::new(),
             read_bytes: 0,
+            read_requests: 0,
+            size_requests: 0,
             chunk_limit: MAX_READ,
         }));
         RemoteStream {
@@ -503,6 +558,7 @@ mod tests {
             output: PipeWriter(peer),
             remaining: MAX_DECODE,
             deadline: Instant::now() + Duration::from_secs(8),
+            size: None,
         }
     }
     #[test]
@@ -520,6 +576,7 @@ mod tests {
             output: Vec::new(),
             remaining: 100,
             deadline: Instant::now() + Duration::from_secs(1),
+            size: None,
         };
         assert!(stream.read(&mut [0; 4]).is_err());
         assert_eq!(stream.output, [1, 4, 0, 0, 0]);
@@ -531,6 +588,7 @@ mod tests {
             output: Vec::new(),
             remaining: 100,
             deadline: Instant::now() + Duration::from_secs(1),
+            size: None,
         };
         assert_eq!(stream.seek(SeekFrom::End(-4)).unwrap(), 12);
         assert_eq!(&stream.output[1..9], &(-4i64).to_le_bytes());
@@ -570,22 +628,67 @@ mod tests {
         image
             .write_to(&mut bytes, image::ImageFormat::Jpeg)
             .unwrap();
-        let (width, height, pixels) = decode(&mut remote(bytes.into_inner()), 120).unwrap();
+        let mut source = remote(bytes.into_inner());
+        let (width, height, pixels) = decode(&mut source, 120).unwrap();
         assert_eq!((width, height), (120, 80));
         assert_eq!(pixels.len(), 120 * 80 * 4);
+        let peer = source.input.0.borrow();
+        assert!(peer.read_requests <= 3, "{} reads", peer.read_requests);
+        assert_eq!(peer.size_requests, 1);
+    }
+    #[test]
+    fn bulk_image_reads_handle_short_reads_and_cache_size() {
+        let expected = vec![42; 3 * MAX_READ + 17];
+        let mut source = remote(expected.clone());
+        assert_eq!(read_image_source(&mut source).unwrap(), expected);
+        assert_eq!(source.size().unwrap(), expected.len() as u64);
+        assert_eq!(source.input.0.borrow().read_requests, 5);
+        assert_eq!(source.input.0.borrow().size_requests, 1);
+        let mut source = remote(vec![1, 2, 3, 4, 5]);
+        source.input.0.borrow_mut().chunk_limit = 2;
+        assert_eq!(read_image_source(&mut source).unwrap(), [1, 2, 3, 4, 5]);
+    }
+    #[test]
+    fn bulk_image_reads_reject_oversize_and_do_not_trust_small_reported_size() {
+        let mut source = remote(Vec::new());
+        source.size = Some(MAX_SOURCE + 1);
+        assert!(read_image_source(&mut source).is_err());
+        assert_eq!(source.input.0.borrow().read_requests, 0);
+        // A stream whose declared size is too small is still read to EOF.
+        let mut source = remote(vec![1; 123]);
+        source.size = Some(1);
+        assert_eq!(read_image_source(&mut source).unwrap().len(), 123);
     }
     #[test]
     fn mov_and_short_eof_frames_decode_through_custom_io() {
         let Ok(directory) = std::env::var("VMV_THUMBNAIL_FIXTURES") else {
             return;
         };
-        for name in ["bframes.mov", "short.mp4"] {
+        for name in ["bframes.mov", "short.mp4", "fallback.ts"] {
             let bytes = std::fs::read(std::path::Path::new(&directory).join(name)).unwrap();
             let (width, height, pixels) = decode(&mut remote(bytes), 80).unwrap();
             assert_eq!((width, height), (80, 48), "{name}");
             assert_eq!(pixels.len(), 80 * 48 * 4);
             assert!(pixels.chunks_exact(4).any(|p| p[0] > 30 || p[1] > 30));
         }
+    }
+    #[test]
+    fn header_complete_video_does_not_scan_whole_clip() {
+        let Ok(directory) = std::env::var("VMV_THUMBNAIL_FIXTURES") else {
+            return;
+        };
+        let bytes = std::fs::read(std::path::Path::new(&directory).join("faststart.mp4")).unwrap();
+        let length = bytes.len();
+        let mut source = remote(bytes);
+        let (width, height, _) = decode(&mut source, 80).unwrap();
+        assert_eq!((width, height), (80, 45));
+        let peer = source.input.0.borrow();
+        assert!(
+            peer.read_bytes < length / 2,
+            "read {} / {length} bytes",
+            peer.read_bytes
+        );
+        assert_eq!(peer.size_requests, 1);
     }
     #[test]
     fn unsupported_and_audio_only_inputs_fail_cleanly() {
