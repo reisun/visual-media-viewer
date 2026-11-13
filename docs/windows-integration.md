@@ -135,3 +135,23 @@ without losing the actual ON state, and moving the original portable folder.
 Check Explorer thumbnails for JPEG/transparent PNG/WebP/TIFF/HEIC, audio/video
 MP4, B-frame MOV, MKV, large movies, corrupt files and rapid folder navigation.
 Verify playback and seeking remain stable while registration work runs.
+
+## Missing thumbnails
+
+An enabled checkbox confirms registration, not successful DLL activation or
+thumbnail extraction. If no thumbnails appear even after updating components,
+run `diagnose-windows-thumbnails.cmd` from the extracted distribution. It records
+Windows thumbnail settings, effective extension handlers, component presence,
+direct provider tests and a forced Windows Shell extraction of generated test
+images. Child probes have time limits so a blocked extraction does not stop the
+whole report. The report is `thumbnail-diagnostic.txt` beside the tool.
+
+The tool does not change registrations or thumbnail settings, erase the global
+cache, disable process isolation, or terminate Explorer. Generated test files
+are removed after completed tests; a forcibly timed-out child may leave its
+small test directory behind. The Shell probe can populate cache entries for its
+generated files. Report paths have the current user profile replaced with a
+placeholder; review the report before sharing it. A passing direct-DLL test
+alone does not prove that Windows can activate the registered handler in its
+isolated thumbnail host. Windows runtime results are needed to diagnose that
+boundary; Linux decoder tests do not cover it.

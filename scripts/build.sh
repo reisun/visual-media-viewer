@@ -47,6 +47,9 @@ fi
 
 cp "$PROJECT_DIR/licenses/"* "$DIST_DIR/"
 cp "$PROJECT_DIR/LICENSE" "$DIST_DIR/LICENSE.txt"
+cp "$PROJECT_DIR/scripts/test-windows-shell.ps1" "$DIST_DIR/"
+cp "$PROJECT_DIR/scripts/diagnose-windows-thumbnails.ps1" "$DIST_DIR/"
+cp "$PROJECT_DIR/scripts/diagnose-windows-thumbnails.cmd" "$DIST_DIR/"
 
 echo ""
 echo "=== Build successful [$PROFILE] ==="
