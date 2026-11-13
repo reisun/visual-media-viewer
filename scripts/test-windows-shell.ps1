@@ -112,6 +112,27 @@ public static class VisualMediaViewerShellSmoke
         }
     }
 
+    private static void CheckApartmentBound(IntPtr instance, string name)
+    {
+        Guid[] forbidden = {
+            new Guid("94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90"), // IAgileObject
+            new Guid("00000003-0000-0000-C000-000000000046")  // IMarshal
+        };
+        foreach (Guid interfaceId in forbidden)
+        {
+            Guid iid = interfaceId;
+            IntPtr result = IntPtr.Zero;
+            try
+            {
+                int hr = Marshal.QueryInterface(instance, ref iid, out result);
+                if (hr != unchecked((int)0x80004002) || result != IntPtr.Zero)
+                    throw new InvalidOperationException(name + " must use standard apartment marshaling; QI "
+                        + iid + " returned HRESULT 0x" + hr.ToString("X8") + ".");
+            }
+            finally { Release(ref result); }
+        }
+    }
+
     public static void CreateAlphaPng(string path)
     {
         using (Bitmap image = new Bitmap(320, 160, PixelFormat.Format32bppArgb))
@@ -143,9 +164,11 @@ public static class VisualMediaViewerShellSmoke
             Guid classId = ClassId, factoryId = ClassFactoryId, thumbnailId = ThumbnailId;
             Check(getClass(ref classId, ref factoryId, out factory), "DllGetClassObject");
             if (factory == IntPtr.Zero) throw new InvalidOperationException("Factory pointer is null.");
+            CheckApartmentBound(factory, "Class factory");
             CreateInstance create = (CreateInstance)Method(factory, 3, typeof(CreateInstance));
             Check(create(factory, IntPtr.Zero, ref thumbnailId, out thumbnail), "IClassFactory.CreateInstance");
             if (thumbnail == IntPtr.Zero) throw new InvalidOperationException("Thumbnail provider pointer is null.");
+            CheckApartmentBound(thumbnail, "Thumbnail provider");
             Guid initializerId = StreamInitializerId;
             Check(Marshal.QueryInterface(thumbnail, ref initializerId, out initializer), "QueryInterface(IInitializeWithStream)");
             Check(SHCreateStreamOnFileEx(path, 0x40, 0, false, IntPtr.Zero, out stream), "Open test source stream");
@@ -231,7 +254,7 @@ public static class VisualMediaViewerShellSmoke
             string valid = RunCase(getClass, canUnload, media, checkAlpha, false);
             string invalid = RunCase(getClass, canUnload, malformed, false, true);
             return valid + Environment.NewLine + invalid + Environment.NewLine
-                + "COM objects released; DLL unloadable. No registry registration was performed.";
+                + "Apartment-bound COM interfaces verified; objects released; DLL unloadable. No registry registration was performed.";
         }
         finally
         {

@@ -24,8 +24,14 @@ Windows Settings. Thumbnail registration is not changed by either operation.
 the supported extensions in the current user's
 `Software\Classes\.ext\shellex\{E357FCCD-A995-4576-B01F-234630154E96}`.
 Its class is `{D4F66B4E-5762-4BA9-9633-138915FD01A7}` and uses the Apartment
-threading model. The existing user override is backed up with its original
-registry type and bytes, including the difference between absent and empty.
+threading model.
+The provider and class factory explicitly disable automatic COM agility, matching
+the Apartment registration. A retained `IStream` must stay in its COM apartment;
+the implementation must not advertise that it can be called directly from an
+arbitrary apartment. Windows uses standard marshaling instead.
+
+The existing user override is backed up with its original registry type and bytes,
+including the difference between absent and empty.
 Disabling restores that override only if this app's handler is still registered;
 a later change made by another app is preserved. Machine-wide settings are not
 modified. Changes notify the shell with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
@@ -145,6 +151,10 @@ Windows thumbnail settings, effective extension handlers, component presence,
 direct provider tests and a forced Windows Shell extraction of generated test
 images. Child probes have time limits so a blocked extraction does not stop the
 whole report. The report is `thumbnail-diagnostic.txt` beside the tool.
+PNG and JPEG Shell probes run in separate MTA processes, so a stalled PNG does
+not prevent JPEG from being checked. This also avoids an unpumped PowerShell STA
+being mistaken for a provider failure. Direct provider tests verify that neither
+the factory nor the provider advertises automatic `IAgileObject`/`IMarshal`.
 
 The tool does not change registrations or thumbnail settings, erase the global
 cache, disable process isolation, or terminate Explorer. Generated test files
