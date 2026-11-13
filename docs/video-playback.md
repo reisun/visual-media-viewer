@@ -24,6 +24,10 @@ displayed texture visible while waiting for the replacement frame.
 
 ## Initial open
 
+The command-line file opens after the first native UI frame; see
+[startup.md](startup.md). Video preparation itself still uses the existing
+synchronous initialization and playback session behavior.
+
 Opening a video prepares the input and threaded video decoder once. Metadata
 and the initial playback session use that same preparation instead of opening
 the input and video decoder twice. Stream selection, probe limits, decoder

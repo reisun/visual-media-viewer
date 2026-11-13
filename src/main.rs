@@ -7,6 +7,7 @@ mod image_decode;
 mod ipc;
 mod media_overlay;
 mod settings;
+mod startup;
 mod title_bar;
 mod video_player;
 mod viewer;
@@ -183,7 +184,12 @@ fn main() -> eframe::Result<()> {
                     .clone()
                     .expect("wgpu render state required"),
             );
-            Ok(Box::new(ViewerApp::new(initial_path, render_state, ipc_rx)))
+            Ok(Box::new(ViewerApp::new(
+                initial_path,
+                render_state,
+                ipc_rx,
+                saved_settings,
+            )))
         }),
     )
 }
