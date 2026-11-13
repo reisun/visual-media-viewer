@@ -22,7 +22,9 @@ and are shown only when that path is selected.
 ## JPEG preview and full resolution
 
 Fit-to-window requests use the longest physical viewport dimension as the JPEG
-preview target. The initial request before the first frame uses 2048 pixels.
+preview target, including the initial request. Opening the command-line file
+waits until after the first native UI frame, so the actual viewport size and DPI
+are available before decoding starts; there is no fixed 2048-pixel initial decode.
 TurboJPEG chooses an explicit supported DCT scale, rounds decoded dimensions
 up, and retains enough pixels for the target when the GPU limit permits it.
 Larger windows request an upgraded preview. Zooming beyond the initial fit or

@@ -186,6 +186,7 @@ struct DialogMessage {
 }
 
 pub struct ViewerApp {
+    initial_open: crate::startup::DeferredFileOpen,
     image_size: Option<[usize; 2]>,
     preview_dim: u32,
     file_list: Option<FileList>,
@@ -223,8 +224,8 @@ impl ViewerApp {
         initial_path: Option<PathBuf>,
         render_state: Arc<eframe::egui_wgpu::RenderState>,
         ipc_rx: mpsc::Receiver<PathBuf>,
+        settings: Settings,
     ) -> Self {
-        let settings = Settings::load();
         let mut transform = ViewTransform::default();
         transform.rotation = settings.rotation;
         let fit_mode = match settings.fit_mode {
@@ -232,9 +233,10 @@ impl ViewerApp {
             FitModeSetting::OriginalSize => FitMode::OriginalSize,
         };
 
-        let mut app = Self {
+        Self {
+            initial_open: crate::startup::DeferredFileOpen::new(initial_path),
             image_size: None,
-            preview_dim: 2048,
+            preview_dim: 1,
             file_list: None,
             cache: ImageCache::new(
                 1_500_000_000,
@@ -266,13 +268,7 @@ impl ViewerApp {
             loading_image: None,
             pending_folder_delete: None,
             dialog_message: None,
-        };
-
-        if let Some(path) = initial_path {
-            app.open_file(&path);
         }
-
-        app
     }
 
     fn evict_distant_textures(&mut self) {
@@ -348,6 +344,7 @@ impl ViewerApp {
     }
 
     fn open_file(&mut self, path: &Path) {
+        self.initial_open.cancel();
         let canonical = match std::fs::canonicalize(path) {
             Ok(p) => p,
             Err(e) => {
@@ -357,10 +354,13 @@ impl ViewerApp {
         };
 
         if let Some(parent) = canonical.parent() {
-            let mut file_list = FileList::from_directory(parent);
+            let mut file_list = FileList::from_directory_sorted(
+                parent,
+                self.saved_file_sort_key(),
+                self.saved_file_sort_order(),
+            );
             file_list.set_group_by(self.saved_group_by());
             file_list.re_sort_dirs(self.saved_sort_key(), self.saved_sort_order());
-            file_list.re_sort_files(self.saved_file_sort_key(), self.saved_file_sort_order());
             file_list.set_current(&canonical);
             self.file_list = Some(file_list);
             self.after_file_selection_changed();
@@ -370,10 +370,14 @@ impl ViewerApp {
     }
 
     fn open_directory(&mut self, dir: &Path) {
-        let mut file_list = FileList::from_directory(dir);
+        self.initial_open.cancel();
+        let mut file_list = FileList::from_directory_sorted(
+            dir,
+            self.saved_file_sort_key(),
+            self.saved_file_sort_order(),
+        );
         file_list.set_group_by(self.saved_group_by());
         file_list.re_sort_dirs(self.saved_sort_key(), self.saved_sort_order());
-        file_list.re_sort_files(self.saved_file_sort_key(), self.saved_file_sort_order());
         if file_list.file_count() > 0 {
             self.cache.clear();
             self.file_list = Some(file_list);
@@ -1514,9 +1518,14 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {
+        // This hook runs once per native frame, unlike multipass UI layout.
+        self.initial_open.begin_frame();
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let screen = ctx.screen_rect().size() * ctx.pixels_per_point();
-        self.preview_dim = screen.x.max(screen.y).ceil().max(1.0) as u32;
+        self.preview_dim =
+            crate::startup::preview_dimension(ctx.screen_rect().size(), ctx.pixels_per_point());
         for path in self.cache.poll() {
             if let Some(entry) = self.texture_cache.remove(&path) {
                 self.render_state
@@ -1560,6 +1569,10 @@ impl eframe::App for ViewerApp {
                 .collect()
         });
         if let Some(path) = dropped.into_iter().next() {
+            self.open_file(&path);
+        }
+
+        if let Some(path) = self.initial_open.take_ready() {
             self.open_file(&path);
         }
 
@@ -1819,6 +1832,9 @@ impl eframe::App for ViewerApp {
                         let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
                         media_overlay::paint(ui, rect, MediaOverlay::Loading);
                     }
+                } else if self.initial_open.is_pending() {
+                    let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+                    media_overlay::paint(ui, rect, MediaOverlay::Loading);
                 } else if self.file_list.is_none() {
                     ui.centered_and_justified(|ui| {
                         ui.label(
@@ -1830,7 +1846,7 @@ impl eframe::App for ViewerApp {
 
         self.draw_folder_delete_dialog(ctx);
         self.draw_dialog_message(ctx);
-        if self.cache.is_loading() {
+        if self.cache.is_loading() || self.initial_open.is_pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }

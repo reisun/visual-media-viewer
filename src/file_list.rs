@@ -141,6 +141,10 @@ pub struct FileList {
 
 impl FileList {
     pub fn from_directory(dir: &Path) -> Self {
+        Self::from_directory_sorted(dir, SortKey::Name, SortOrder::Ascending)
+    }
+
+    pub fn from_directory_sorted(dir: &Path, key: SortKey, order: SortOrder) -> Self {
         let mut fl = Self {
             files: Vec::new(),
             current_index: 0,
@@ -148,8 +152,8 @@ impl FileList {
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
             group_by: GroupBy::Off,
-            file_sort_key: SortKey::Name,
-            file_sort_order: SortOrder::Ascending,
+            file_sort_key: key,
+            file_sort_order: order,
         };
         fl.scan_and_sort();
         fl
@@ -175,24 +179,29 @@ impl FileList {
         let sort_key = self.file_sort_key;
         let sort_order = self.file_sort_order;
 
-        files.sort_by(|a, b| {
-            let cmp = match sort_key {
-                SortKey::Name => {
-                    let a_name = a.file_name().unwrap_or_default().to_string_lossy();
-                    let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-                    win_sort::compare_logical(&a_name, &b_name)
+        match sort_key {
+            SortKey::Name => files.sort_by(|a, b| {
+                let a_name = a.file_name().unwrap_or_default().to_string_lossy();
+                let b_name = b.file_name().unwrap_or_default().to_string_lossy();
+                let cmp = win_sort::compare_logical(&a_name, &b_name);
+                match sort_order {
+                    SortOrder::Ascending => cmp,
+                    SortOrder::Descending => cmp.reverse(),
                 }
-                SortKey::ModifiedDate => {
-                    let a_time = file_modified_time(a);
-                    let b_time = file_modified_time(b);
-                    a_time.cmp(&b_time)
-                }
-            };
-            match sort_order {
-                SortOrder::Ascending => cmp,
-                SortOrder::Descending => cmp.reverse(),
+            }),
+            SortKey::ModifiedDate => {
+                // Capture timestamps once, retaining directory order for equal keys.
+                let mut dated_files: Vec<_> = files
+                    .into_iter()
+                    .map(|path| (file_modified_time(&path), path))
+                    .collect();
+                dated_files.sort_by(|a, b| match sort_order {
+                    SortOrder::Ascending => a.0.cmp(&b.0),
+                    SortOrder::Descending => b.0.cmp(&a.0),
+                });
+                files = dated_files.into_iter().map(|(_, path)| path).collect();
             }
-        });
+        }
 
         self.files = files;
     }
@@ -600,6 +609,61 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, b"test").unwrap();
+    }
+
+    #[test]
+    fn saved_name_order_is_applied_on_initial_scan() {
+        let dir = unique_temp_dir("saved-order");
+        for name in ["image1.jpg", "image10.jpg", "image2.jpg", "ignore.txt"] {
+            touch(&dir.join(name));
+        }
+        std::fs::create_dir(dir.join("directory.jpg")).unwrap();
+
+        let mut list = FileList::from_directory_sorted(&dir, SortKey::Name, SortOrder::Descending);
+        assert_eq!(
+            list.files,
+            ["image10.jpg", "image2.jpg", "image1.jpg"].map(|name| dir.join(name))
+        );
+        list.set_current(&dir.join("image2.jpg"));
+        list.re_sort_files(SortKey::Name, SortOrder::Ascending);
+        assert_eq!(list.current_path(), Some(dir.join("image2.jpg").as_path()));
+        assert_eq!(list.current_index(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn modified_date_sort_preserves_equal_timestamp_order_and_selection() {
+        let dir = unique_temp_dir("date-order");
+        for (name, seconds) in [("a.jpg", 100), ("b.mp4", 200), ("c.png", 100)] {
+            let path = dir.join(name);
+            touch(&path);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(
+                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ),
+                )
+                .unwrap();
+        }
+        let mut equal_order: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap() != "b.mp4")
+            .collect();
+        let mut list =
+            FileList::from_directory_sorted(&dir, SortKey::ModifiedDate, SortOrder::Ascending);
+        let mut expected = equal_order.clone();
+        expected.push(dir.join("b.mp4"));
+        assert_eq!(list.files, expected);
+        list.set_current(&dir.join("c.png"));
+        list.re_sort_files(SortKey::ModifiedDate, SortOrder::Descending);
+        equal_order.insert(0, dir.join("b.mp4"));
+        assert_eq!(list.files, equal_order);
+        assert_eq!(list.current_path(), Some(dir.join("c.png").as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
