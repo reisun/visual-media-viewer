@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod app_icon;
 mod cache;
 mod file_list;
 mod folder_ops;
@@ -72,17 +73,6 @@ fn configure_fonts(ctx: &egui::Context) {
     }
 
     ctx.set_fonts(fonts);
-}
-
-fn load_app_icon() -> Option<egui::IconData> {
-    let png_bytes = include_bytes!("../assets/icon.png");
-    let img = image::load_from_memory(png_bytes).ok()?.into_rgba8();
-    let (w, h) = img.dimensions();
-    Some(egui::IconData {
-        rgba: img.into_raw(),
-        width: w,
-        height: h,
-    })
 }
 
 fn setup_panic_hook() {
@@ -172,18 +162,16 @@ fn main() -> eframe::Result<()> {
         None => "Visual Media Viewer".to_string(),
     };
 
-    let icon = load_app_icon();
+    let icon = app_icon::load();
     let saved_settings = settings::Settings::load();
 
-    let mut viewport = egui::ViewportBuilder::default()
+    let viewport = egui::ViewportBuilder::default()
         .with_inner_size([saved_settings.window_width, saved_settings.window_height])
         .with_maximized(saved_settings.maximized)
         .with_title(&title)
         .with_drag_and_drop(true)
-        .with_decorations(false);
-    if let Some(icon_data) = icon {
-        viewport = viewport.with_icon(std::sync::Arc::new(icon_data));
-    }
+        .with_decorations(false)
+        .with_icon(std::sync::Arc::new(icon));
 
     let options = eframe::NativeOptions {
         viewport,
@@ -195,6 +183,8 @@ fn main() -> eframe::Result<()> {
         "Visual Media Viewer",
         options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            app_icon::set_taskbar_icon(cc);
             configure_fonts(&cc.egui_ctx);
             let render_state = std::sync::Arc::new(
                 cc.wgpu_render_state

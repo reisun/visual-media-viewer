@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 // Test the production modules without the Windows video/audio dependencies.
+#[path = "../../src/app_icon.rs"]
+mod app_icon;
 #[path = "../../src/cache.rs"]
 mod cache;
 #[path = "../../src/file_list.rs"]
