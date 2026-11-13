@@ -19,8 +19,15 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICBmpDecoder, CLSID_WICGifDecoder, CLSID_WICImagingFactory, CLSID_WICJpegDecoder,
+    CLSID_WICPngDecoder, CLSID_WICTiffDecoder, GUID_WICPixelFormat32bppRGBA, IWICBitmapDecoder,
+    IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant,
+    WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+};
 use windows::Win32::System::Com::{
-    IClassFactory, IClassFactory_Impl, IStream, STATSTG, STREAM_SEEK_CUR, STREAM_SEEK_SET,
+    CoCreateInstance, IClassFactory, IClassFactory_Impl, IStream, CLSCTX_INPROC_SERVER,
+    STATFLAG_NONAME, STATSTG, STREAM_SEEK_CUR, STREAM_SEEK_SET,
 };
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::UI::Shell::PropertiesSystem::{
@@ -196,6 +203,104 @@ struct Pixels {
 }
 
 fn generate(stream: &IStream, size: u32) -> Result<Pixels> {
+    if let Some(class) = wic_decoder_class(stream).unwrap_or(None) {
+        if let Ok(pixels) = wic_thumbnail(stream, size, &class) {
+            return Ok(pixels);
+        }
+    }
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
+    generate_with_worker(stream, size)
+}
+
+fn wic_decoder_class(stream: &IStream) -> Result<Option<GUID>> {
+    let mut signature = [0u8; 32];
+    let mut length = 0;
+    unsafe {
+        let mut stat = STATSTG::default();
+        stream.Stat(&mut stat, STATFLAG_NONAME)?;
+        if stat.cbSize > 128 * 1024 * 1024 {
+            return Ok(None);
+        }
+        stream.Seek(0, STREAM_SEEK_SET, None)?;
+        while length < signature.len() {
+            let mut actual = 0;
+            stream
+                .Read(
+                    signature[length..].as_mut_ptr().cast(),
+                    (signature.len() - length) as u32,
+                    Some(&mut actual),
+                )
+                .ok()?;
+            if actual == 0 {
+                break;
+            }
+            if actual as usize > signature.len() - length {
+                return Err(E_FAIL.into());
+            }
+            length += actual as usize;
+        }
+        stream.Seek(0, STREAM_SEEK_SET, None)?;
+    }
+    let bytes = &signature[..length];
+    Ok(if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(CLSID_WICJpegDecoder)
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(CLSID_WICPngDecoder)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(CLSID_WICGifDecoder)
+    } else if bytes.starts_with(b"BM") {
+        Some(CLSID_WICBmpDecoder)
+    } else if bytes.starts_with(b"II\x2a\0") || bytes.starts_with(b"MM\0\x2a") {
+        Some(CLSID_WICTiffDecoder)
+    } else {
+        None
+    })
+}
+
+fn wic_thumbnail(stream: &IStream, size: u32, class: &GUID) -> Result<Pixels> {
+    unsafe {
+        // Use the caller's COM apartment and keep WIC objects local to this request.
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let decoder: IWICBitmapDecoder = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
+        decoder.Initialize(stream, WICDecodeMetadataCacheOnDemand)?;
+        let frame = decoder.GetFrame(0)?;
+        let (mut width, mut height) = (0, 0);
+        frame.GetSize(&mut width, &mut height)?;
+        if width == 0
+            || height == 0
+            || width > 32768
+            || height > 32768
+            || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+        {
+            return Err(E_FAIL.into());
+        }
+        let ratio = (f64::from(size) / f64::from(width.max(height))).min(1.0);
+        let width = ((f64::from(width) * ratio).round() as u32).max(1);
+        let height = ((f64::from(height) * ratio).round() as u32).max(1);
+        // Immediately following the frame lets WIC use JPEG's native reduced decoding.
+        let scaler = factory.CreateBitmapScaler()?;
+        scaler.Initialize(&frame, width, height, WICBitmapInterpolationModeFant)?;
+        let converter = factory.CreateFormatConverter()?;
+        converter.Initialize(
+            &scaler,
+            &GUID_WICPixelFormat32bppRGBA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )?;
+        let mut rgba = vec![0; width as usize * height as usize * 4];
+        converter.CopyPixels(std::ptr::null(), width * 4, &mut rgba)?;
+        Ok(Pixels {
+            width,
+            height,
+            rgba,
+        })
+    }
+}
+
+fn generate_with_worker(stream: &IStream, size: u32) -> Result<Pixels> {
     let mut child = Command::new(executable()?)
         .args(["--shell-thumbnail-worker", "--size", &size.to_string()])
         .creation_flags(0x08000000)

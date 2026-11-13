@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $DistributionDirectory = (Join-Path $PSScriptRoot '..\dist'),
-    [string] $MediaPath
+    [string] $MediaPath,
+    [switch] $NativeImagesOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +12,11 @@ if ([IntPtr]::Size -ne 8) {
 
 $distribution = (Resolve-Path -LiteralPath $DistributionDirectory).ProviderPath
 $provider = Join-Path $distribution 'VisualMediaViewerThumbnail.dll'
-foreach ($required in @($provider, (Join-Path $distribution 'VisualMediaViewer.exe'))) {
+$requiredFiles = @($provider)
+if (-not $NativeImagesOnly) {
+    $requiredFiles += Join-Path $distribution 'VisualMediaViewer.exe'
+}
+foreach ($required in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required distribution file is missing: $required"
     }
@@ -22,6 +27,7 @@ if (-not ('VisualMediaViewerShellSmoke' -as [type])) {
     Add-Type -ReferencedAssemblies System.Drawing.dll -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -44,6 +50,8 @@ public static class VisualMediaViewerShellSmoke
     private delegate int InitializeStream(IntPtr self, IntPtr stream, uint mode);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int GetThumbnail(IntPtr self, uint size, out IntPtr bitmap, out uint alpha);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int SeekStream(IntPtr self, long move, uint origin, out ulong position);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeBitmap
@@ -114,6 +122,16 @@ public static class VisualMediaViewerShellSmoke
         }
     }
 
+    public static void CreateJpeg(string path)
+    {
+        using (Bitmap image = new Bitmap(320, 160, PixelFormat.Format24bppRgb))
+        {
+            using (Graphics graphics = Graphics.FromImage(image))
+                graphics.Clear(Color.FromArgb(200, 100, 50));
+            image.Save(path, ImageFormat.Jpeg);
+        }
+    }
+
     private static string RunCase(GetClassObject getClass, CanUnloadNow canUnload,
         string path, bool checkAlpha, bool expectFailure)
     {
@@ -137,8 +155,16 @@ public static class VisualMediaViewerShellSmoke
                 throw new InvalidOperationException("DllCanUnloadNow must return S_FALSE while COM objects are alive.");
 
             GetThumbnail getThumbnail = (GetThumbnail)Method(thumbnail, 3, typeof(GetThumbnail));
+            SeekStream seek = (SeekStream)Method(stream, 5, typeof(SeekStream));
+            ulong position;
+            Check(seek(stream, 3, 0, out position), "Position source stream");
             uint alpha;
+            Stopwatch timer = Stopwatch.StartNew();
             int hr = getThumbnail(thumbnail, 64, out bitmap, out alpha);
+            timer.Stop();
+            Check(seek(stream, 0, 1, out position), "Inspect source stream position");
+            if (position != 3)
+                throw new InvalidOperationException("Source stream position was not restored.");
             if (expectFailure)
             {
                 if (hr >= 0 || bitmap != IntPtr.Zero)
@@ -170,7 +196,8 @@ public static class VisualMediaViewerShellSmoke
                                 + String.Join(",", Array.ConvertAll(pixel, x => x.ToString())) + "].");
                 }
                 description = "Thumbnail: " + info.Width + "x" + info.Height + ", 32-bit ARGB"
-                    + (checkAlpha ? "; aspect ratio and premultiplied alpha verified." : ".");
+                    + (checkAlpha ? "; aspect ratio and premultiplied alpha verified." : ".")
+                    + " Generation: " + timer.Elapsed.TotalMilliseconds.ToString("F1") + " ms.";
             }
         }
         finally
@@ -220,6 +247,11 @@ public static class VisualMediaViewerShellSmoke
 $temporaryDirectory = Join-Path $distribution ('.shell-smoke-' + [Guid]::NewGuid().ToString('N'))
 [void] (New-Item -ItemType Directory -Path $temporaryDirectory)
 try {
+    if ($NativeImagesOnly) {
+        $nativeProvider = Join-Path $temporaryDirectory 'VisualMediaViewerThumbnail.dll'
+        Copy-Item -LiteralPath $provider -Destination $nativeProvider
+        $provider = $nativeProvider
+    }
     $generated = [string]::IsNullOrWhiteSpace($MediaPath)
     if ($generated) {
         $source = Join-Path $temporaryDirectory 'alpha.png'
@@ -230,6 +262,12 @@ try {
     $malformed = Join-Path $temporaryDirectory 'malformed.bin'
     [System.IO.File]::WriteAllBytes($malformed, [byte[]] (0, 1, 2, 3, 4, 5, 6, 7))
     [VisualMediaViewerShellSmoke]::Run($provider, $source, $malformed, $generated)
+    if ($NativeImagesOnly -and $generated) {
+        $jpeg = Join-Path $temporaryDirectory 'native.jpg'
+        [VisualMediaViewerShellSmoke]::CreateJpeg($jpeg)
+        [VisualMediaViewerShellSmoke]::Run($provider, $jpeg, $malformed, $false)
+        'PNG and JPEG succeeded without any worker EXE beside the thumbnail DLL.'
+    }
 } finally {
     Get-ChildItem -LiteralPath $temporaryDirectory -File | Remove-Item -Force
     Remove-Item -LiteralPath $temporaryDirectory -Force
