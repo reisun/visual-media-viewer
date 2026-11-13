@@ -1,0 +1,8 @@
+services:
+  thumbnail-tests:
+    build:
+      context: ../..
+      dockerfile: scripts/thumbnail-tests/Dockerfile
+    volumes:
+      - ../..:/app
+      - ../../target-docker/thumbnail-tests:/app/target/thumbnail-tests

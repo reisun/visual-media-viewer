@@ -7,7 +7,10 @@ mod image_decode;
 mod ipc;
 mod media_overlay;
 mod settings;
+mod shell_integration;
+mod shell_ui;
 mod startup;
+mod thumbnail_worker;
 mod title_bar;
 mod video_player;
 mod viewer;
@@ -131,6 +134,20 @@ fn setup_file_logger() {
 }
 
 fn main() -> eframe::Result<()> {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--shell-thumbnail-worker"))
+    {
+        let size = std::env::args()
+            .nth(2)
+            .filter(|value| value == "--size")
+            .and_then(|_| std::env::args().nth(3))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(256);
+        if thumbnail_worker::run(size).is_err() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     setup_panic_hook();
     setup_file_logger();
 

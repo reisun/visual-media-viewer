@@ -46,6 +46,7 @@ else
 fi
 
 cp "$PROJECT_DIR/licenses/"* "$DIST_DIR/"
+cp "$PROJECT_DIR/LICENSE" "$DIST_DIR/LICENSE.txt"
 
 echo ""
 echo "=== Build successful [$PROFILE] ==="
