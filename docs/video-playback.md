@@ -8,6 +8,14 @@ and uploads the texture only when the revision differs from the last uploaded
 revision. Presentation timestamps are not used as frame identity: distinct
 frames can have identical timestamps, and seeking can revisit a timestamp.
 
+Frame pixels use immutable reference-counted storage, so passing a selected
+frame to the viewer or retaining a prebuffer preview does not copy its pixel
+buffer. The decoder copies tightly packed RGBA rows from the FFmpeg output
+directly into a recycled buffer, omitting FFmpeg stride padding. The final owner
+returns the buffer to a per-session, nonblocking pool with at most four spares;
+full or closed pools discard returned buffers. A new session has a new pool,
+and buffers still referenced by a preview or upload cannot be reused.
+
 Revisions survive seeks within one player. Destroying the video texture resets
 the viewer's upload tracking, including when changing files. Polling and the
 existing presentation clock continue even when no upload is needed.
@@ -21,6 +29,17 @@ Loading and stopped indicators are overlays over the most recent video texture,
 with a small translucent backdrop. If no video frame has been displayed yet,
 the same indicator appears over the viewer background. Seeking keeps the last
 displayed texture visible while waiting for the replacement frame.
+
+While prebuffering, the first decoded frame is displayed as a still image under
+the loading overlay. That frame remains at the front of the playback queue:
+showing it does not consume a buffered frame, start audio, or reset the playback
+clock. Normal playback still starts only at the existing eight-frame threshold,
+two-second timeout from the first received frame, or decoder disconnection with
+buffered frames. Transitioning from the preview to that same playback frame
+does not change its revision or upload it twice. Seeking clears the preview and
+queue through the existing session reset before a new preview can be selected.
+Pausing and resuming while the preview is still buffering keeps audio paused
+until those same start conditions are met.
 
 ## Initial open
 
